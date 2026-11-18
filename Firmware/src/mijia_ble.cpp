@@ -7,10 +7,13 @@
 namespace {
 constexpr char serviceId[] = "ebe0ccb0-7a0a-4b0c-8a1a-6ff2997da3a6";
 constexpr char measurementId[] = "ebe0ccc1-7a0a-4b0c-8a1a-6ff2997da3a6";
-constexpr unsigned sampleIntervalMs = 60000;
+constexpr unsigned sampleIntervalMs = 300000;
+constexpr unsigned retryDelayMs = 10000;
+constexpr unsigned maxAttempts = 3;
 
 uint8_t sensorAddress[mijiaAddressSize] = {};
 QueueHandle_t readings = nullptr;
+QueueHandle_t outcomes = nullptr;
 TaskHandle_t readerTask = nullptr;
 
 bool publishSample(const uint8_t* data, size_t size) {
@@ -45,12 +48,14 @@ void readSensor(void*) {
     snprintf(mac, sizeof(mac), "%02x:%02x:%02x:%02x:%02x:%02x", sensorAddress[0], sensorAddress[1],
              sensorAddress[2], sensorAddress[3], sensorAddress[4], sensorAddress[5]);
     const NimBLEAddress target(mac, BLE_ADDR_PUBLIC);
+    unsigned failedAttempts = 0;
     for (;;) {
         ulTaskNotifyTake(pdTRUE, 0);
+        MijiaSample sample{};
+        bool received = false;
         if (client->connect(target)) {
             NimBLERemoteService* service = client->getService(serviceId);
             NimBLERemoteCharacteristic* measurement = service ? service->getCharacteristic(measurementId) : nullptr;
-            bool received = false;
             if (measurement && measurement->canRead()) {
                 const NimBLEAttValue value = measurement->readValue();
                 received = publishSample(value.data(), value.size());
@@ -59,16 +64,25 @@ void readSensor(void*) {
                 received = ulTaskNotifyTake(pdTRUE, pdMS_TO_TICKS(20000)) != 0;
             }
             if (!received) {
-                Serial.printf("[MIJIA] no measurement (service=%d characteristic=%d)\n", service != nullptr,
-                              measurement != nullptr);
+                sample.error = measurement ? -3 : service ? -2 : -1;
             }
             if (client->isConnected()) {
                 client->disconnect();
             }
         } else {
-            Serial.printf("[MIJIA] BLE connection failed code=%d\n", client->getLastError());
+            sample.error = client->getLastError();
         }
-        vTaskDelay(pdMS_TO_TICKS(sampleIntervalMs));
+        if (received && xQueueReceive(readings, &sample.reading, 0) == pdTRUE) {
+            failedAttempts = 0;
+        } else {
+            sample.failedAttempts = ++failedAttempts;
+        }
+        xQueueSend(outcomes, &sample, portMAX_DELAY);
+        const bool retry = failedAttempts > 0 && failedAttempts < maxAttempts;
+        if (!retry) {
+            failedAttempts = 0;
+        }
+        vTaskDelay(pdMS_TO_TICKS(retry ? retryDelayMs : sampleIntervalMs));
     }
 }
 }  // namespace
@@ -82,7 +96,12 @@ bool startMijiaReader(const uint8_t (&address)[mijiaAddressSize]) {
     if (!readings) {
         return false;
     }
-    if (xTaskCreate(readSensor, "mijia", 6144, nullptr, 1, &readerTask) != pdPASS) {
+    outcomes = xQueueCreate(8, sizeof(MijiaSample));
+    if (!outcomes || xTaskCreate(readSensor, "mijia", 6144, nullptr, 1, &readerTask) != pdPASS) {
+        if (outcomes) {
+            vQueueDelete(outcomes);
+            outcomes = nullptr;
+        }
         vQueueDelete(readings);
         readings = nullptr;
         return false;
@@ -90,6 +109,6 @@ bool startMijiaReader(const uint8_t (&address)[mijiaAddressSize]) {
     return true;
 }
 
-bool nextMijiaReading(MijiaReading& reading) {
-    return readings && xQueueReceive(readings, &reading, 0) == pdTRUE;
+bool nextMijiaSample(MijiaSample& sample) {
+    return outcomes && xQueueReceive(outcomes, &sample, 0) == pdTRUE;
 }

@@ -109,7 +109,7 @@ bool appendLog(const char* event, bool clockSynced, bool verify) {
         snprintf(timestamp, sizeof(timestamp), "uptime_ms=%lu", static_cast<unsigned long>(millis()));
     }
 
-    char line[96];
+    char line[192];
     const int length = snprintf(line, sizeof(line), "%s %s\n", timestamp, event);
     File file = SD.open(logPath, FILE_APPEND);
     if (!file || length < 1 || static_cast<size_t>(length) >= sizeof(line)) {
@@ -130,4 +130,8 @@ bool appendLog(const char* event, bool clockSynced, bool verify) {
     }
     Serial.printf("[SD] log verified bytes=%u entry=%s", static_cast<unsigned>(reopened.size()), actual);
     return true;
+}
+
+File openEventLog() {
+    return storageMounted ? SD.open(logPath, FILE_READ) : File{};
 }

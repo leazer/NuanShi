@@ -1,6 +1,7 @@
 #pragma once
 
 #include <Arduino.h>
+#include <FS.h>
 #include "mijia_ble.h"
 
 struct WifiCredentials {
@@ -15,3 +16,4 @@ bool saveCredentials(const WifiCredentials& credentials);
 bool loadMijiaAddress(uint8_t (&address)[mijiaAddressSize]);
 bool saveMijiaAddress(const uint8_t (&address)[mijiaAddressSize]);
 bool appendLog(const char* event, bool clockSynced, bool verify = false);
+File openEventLog();

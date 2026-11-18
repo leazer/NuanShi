@@ -11,5 +11,11 @@ struct MijiaReading {
     unsigned batteryMillivolts;
 };
 
+struct MijiaSample {
+    MijiaReading reading;
+    unsigned failedAttempts;
+    int error;
+};
+
 bool startMijiaReader(const uint8_t (&address)[mijiaAddressSize]);
-bool nextMijiaReading(MijiaReading& reading);
+bool nextMijiaSample(MijiaSample& sample);
