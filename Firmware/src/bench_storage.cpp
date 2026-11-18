@@ -135,3 +135,7 @@ bool appendLog(const char* event, bool clockSynced, bool verify) {
 File openEventLog() {
     return storageMounted ? SD.open(logPath, FILE_READ) : File{};
 }
+
+bool deleteEventLog() {
+    return storageMounted && (!SD.exists(logPath) || SD.remove(logPath));
+}

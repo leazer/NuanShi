@@ -17,3 +17,4 @@ bool loadMijiaAddress(uint8_t (&address)[mijiaAddressSize]);
 bool saveMijiaAddress(const uint8_t (&address)[mijiaAddressSize]);
 bool appendLog(const char* event, bool clockSynced, bool verify = false);
 File openEventLog();
+bool deleteEventLog();
