@@ -23,12 +23,50 @@ constexpr uint16_t servoPulses[] = {1500, 1300, 1700};
 constexpr uint32_t indoorStaleMs = mijiaSampleIntervalMs + 60 * 1000;
 constexpr uint32_t indoorLostMs = mijiaSampleIntervalMs + 3 * 60 * 1000;
 constexpr unsigned trendSamples = 6;  // Roughly ten minutes at the normal sample interval.
+constexpr uint32_t menuTimeoutMs = 10000;
+constexpr uint32_t messageTimeoutMs = 3000;
+constexpr uint32_t backHoldMs = 800;
+constexpr int minutesPerDay = 24 * 60;
+constexpr int minCalibrationUs = 1000;
+constexpr int maxCalibrationUs = 2000;
+constexpr int calibrationStepUs = 5;
+
+enum class Page { Home, About, Settings, Target, Schedule, LowGear, Wifi, Password, Calibration, Message };
+
+struct HeatingSchedule {
+    uint16_t start;
+    uint16_t end;
+};
+
+struct Calibration {
+    uint16_t gearOneUs;
+    uint16_t gearFourUs;
+
+    bool valid() const {
+        return gearOneUs >= minCalibrationUs && gearOneUs <= maxCalibrationUs &&
+               gearFourUs >= minCalibrationUs && gearFourUs <= maxCalibrationUs &&
+               gearOneUs != gearFourUs;
+    }
+
+    int pulseAt(int gearTenths) const {
+        return (gearOneUs * 30 + (gearFourUs - gearOneUs) * (gearTenths - 10) + 15) / 30;
+    }
+};
+
+constexpr const char* settingsLabels[] = {
+    "目标温度", "采暖时段", "低温加热档位", "WiFi IP", "舵机标定"
+};
+constexpr Page settingsPages[] = {
+    Page::Target, Page::Schedule, Page::LowGear, Page::Wifi, Page::Password
+};
+constexpr int settingsCount = sizeof(settingsPages) / sizeof(settingsPages[0]);
 
 int wifiCount = -1;
 int bleCount = -1;
 int wifiChannelCount = 0;
 bool bleReady = false;
 bool servoActive = false;
+bool servoPreview = false;
 size_t nextPulse = 0;
 uint32_t servoStarted = 0;
 std::atomic<bool> clockSynced{false};
@@ -45,12 +83,24 @@ float temperatureHistory[trendSamples] = {};
 unsigned readingsInHistory = 0;
 unsigned nextHistoryIndex = 0;
 int targetTenths = 220;
-bool settingsOpen = false;
+HeatingSchedule schedule{19 * 60, 7 * 60};
+Calibration calibration{};
+int lowGearTenths = 10;
+Page page = Page::Home;
+Page messageReturn = Page::Settings;
+const char* messageText = "";
+uint32_t pageActivity = 0;
+int selectedSetting = 0;
+unsigned passwordIndex = 0;
+bool suppressBRelease = false;
+bool editingSecond = false;
+int draftValue = 0;
+HeatingSchedule draftSchedule{};
+Calibration draftCalibration{};
 bool weatherStarted = false;
 bool wifiWasConnected = false;
 OutdoorSample outdoor{NAN, 0, -1};
 WebServer logServer(80);
-char screenStatus[32] = "Ready";
 
 bool hasOutdoorTemperature() {
     const double age = difftime(time(nullptr), outdoor.observedAt);
@@ -63,8 +113,8 @@ void printAt(const char* text, int x, int y, uint16_t color = TFT_WHITE) {
     M5.Display.print(text);
 }
 
-void printCentered(const char* text, int centerX, int y) {
-    printAt(text, centerX - M5.Display.textWidth(text) / 2, y);
+void printCentered(const char* text, int centerX, int y, uint16_t color = TFT_WHITE) {
+    printAt(text, centerX - M5.Display.textWidth(text) / 2, y, color);
 }
 
 void printTemperature(const char* value, int x, int y, uint16_t color = TFT_WHITE) {
@@ -80,7 +130,8 @@ void drawHeader() {
     auto& display = M5.Display;
     display.setFont(&fonts::efontCN_16);
     display.fillRect(0, 0, 320, 31, TFT_BLACK);
-    printAt("暖时", 10, 8);
+    const char* title = page == Page::Home ? "暖时" : page == Page::About ? "关于" : "设置";
+    printAt(title, 10, 8);
     char date[20] = "--/--  --:--";
     if (displayedSecond > 0) {
         tm local{};
@@ -136,6 +187,9 @@ const char* roomState() {
 }
 
 void drawMeasurements() {
+    if (page != Page::Home) {
+        return;
+    }
     auto& display = M5.Display;
     display.fillRect(0, 34, 320, 132, TFT_BLACK);
     display.setFont(&fonts::efontCN_16);
@@ -178,21 +232,146 @@ void drawMeasurements() {
 }
 
 void drawFooter() {
+    if (page != Page::Home) {
+        return;
+    }
     auto& display = M5.Display;
     display.fillRect(0, 166, 320, 74, TFT_BLACK);
     display.setFont(&fonts::efontCN_16);
-    if (settingsOpen) {
-        printAt(WiFi.status() == WL_CONNECTED ? WiFi.localIP().toString().c_str() : "WiFi 未连接", 12, 174);
-        printAt(sdMounted ? "/nuanshi.log" : "SD 未挂载", 185, 174);
-        printAt(screenStatus, 12, 195, TFT_LIGHTGREY);
-    } else {
-        printAt("观测模式", 12, 176, TFT_CYAN);
-        printAt(roomState(), 100, 176, roomLost() ? TFT_RED : roomStale() ? TFT_ORANGE : TFT_WHITE);
-    }
+    printAt("观测模式", 12, 176, TFT_CYAN);
+    printAt(roomState(), 100, 176, roomLost() ? TFT_RED : roomStale() ? TFT_ORANGE : TFT_WHITE);
+}
+
+void drawButtonLabels(const char* left, const char* middle, const char* right) {
+    M5.Display.setFont(&fonts::efontCN_16);
     // Screen coordinates of the three key centers, measured from the panel photo.
-    printCentered("-0.5 °C", 72, 220);
-    printCentered(settingsOpen ? "返回" : "设置", 160, 220);
-    printCentered("+0.5 °C", 249, 220);
+    printCentered(left, 72, 220);
+    printCentered(middle, 160, 220);
+    printCentered(right, 249, 220);
+}
+
+void formatTime(char* text, size_t size, unsigned minutes) {
+    snprintf(text, size, "%02u:%02u", minutes / 60, minutes % 60);
+}
+
+String localIpLabel() {
+    return WiFi.status() == WL_CONNECTED ? WiFi.localIP().toString() : String("未连接");
+}
+
+void drawMenu() {
+    auto& display = M5.Display;
+    display.fillRect(0, 31, 320, 209, TFT_BLACK);
+    display.setFont(&fonts::efontCN_16);
+    char value[32];
+    switch (page) {
+        case Page::About:
+            printCentered("暖时", 160, 56, TFT_CYAN);
+            printCentered("本设备会根据室内外温度，", 160, 96);
+            printCentered("自动调节燃气地暖的加热控制。", 160, 122);
+            printCentered("当前为观测模式", 160, 171, TFT_LIGHTGREY);
+            break;
+        case Page::Settings: {
+            char start[6], end[6], hours[20], target[16], gear[12];
+            formatTime(start, sizeof(start), schedule.start);
+            formatTime(end, sizeof(end), schedule.end);
+            snprintf(hours, sizeof(hours), "%s - %s", start, end);
+            snprintf(target, sizeof(target), "%.1f °C", targetTenths / 10.0f);
+            snprintf(gear, sizeof(gear), "%.1f", lowGearTenths / 10.0f);
+            const String ip = localIpLabel();
+            const char* values[] = {target, hours, gear, ip.c_str(), calibration.valid() ? "已标定" : "未标定"};
+            for (int row = 0; row < settingsCount; ++row) {
+                const int y = 35 + row * 32;
+                const bool selected = row == selectedSetting;
+                const uint16_t background = selected ? 0x1148 : TFT_BLACK;
+                const uint16_t color = selected ? TFT_CYAN : TFT_LIGHTGREY;
+                display.fillRoundRect(8, y, 304, 29, 5, background);
+                display.setTextColor(color, background);
+                display.setCursor(17, y + 6);
+                display.print(settingsLabels[row]);
+                display.setCursor(301 - display.textWidth(values[row]), y + 6);
+                display.print(values[row]);
+            }
+            printCentered("长按 B 返回", 160, 200, TFT_LIGHTGREY);
+            drawButtonLabels("上移", "进入", "下移");
+            break;
+        }
+        case Page::Target:
+        case Page::LowGear: {
+            const bool target = page == Page::Target;
+            printCentered(target ? "目标温度" : "低温加热档位", 160, 53, TFT_CYAN);
+            snprintf(value, sizeof(value), "%.1f", draftValue / 10.0f);
+            display.setFont(&fonts::FreeSansBold24pt7b);
+            if (target) {
+                printTemperature(value, 160 - (display.textWidth(value) + 26) / 2, 96);
+            } else {
+                printCentered(value, 160, 96);
+                display.setFont(&fonts::efontCN_16);
+                if (calibration.valid()) {
+                    const int pulse = calibration.pulseAt(draftValue);
+                    if (pulse >= minCalibrationUs && pulse <= maxCalibrationUs) {
+                        snprintf(value, sizeof(value), "%d us / %.3f%%", pulse, 100.0 * pulse / servoPeriodUs);
+                        printCentered(value, 160, 160, TFT_LIGHTGREY);
+                    } else {
+                        printCentered("超出标定脉宽范围", 160, 160, TFT_ORANGE);
+                    }
+                } else {
+                    printCentered("舵机尚未标定", 160, 160, TFT_LIGHTGREY);
+                }
+            }
+            drawButtonLabels(target ? "-0.5 °C" : "-0.1", target ? "保存" : "+0.1", target ? "+0.5 °C" : "保存");
+            break;
+        }
+        case Page::Schedule: {
+            printCentered("采暖时段", 160, 53, TFT_CYAN);
+            char start[6], end[6];
+            formatTime(start, sizeof(start), draftSchedule.start);
+            formatTime(end, sizeof(end), draftSchedule.end);
+            snprintf(value, sizeof(value), "起始时间  %s", start);
+            printCentered(value, 160, 95, editingSecond ? TFT_LIGHTGREY : TFT_CYAN);
+            snprintf(value, sizeof(value), "截止时间  %s", end);
+            printCentered(value, 160, 127, editingSecond ? TFT_CYAN : TFT_LIGHTGREY);
+            if (draftSchedule.end < draftSchedule.start) {
+                printCentered("截止时间为次日", 160, 166, TFT_LIGHTGREY);
+            }
+            drawButtonLabels("-5 分", editingSecond ? "保存" : "下一项", "+5 分");
+            break;
+        }
+        case Page::Wifi:
+            printCentered("WiFi IP", 160, 59, TFT_CYAN);
+            display.setFont(&fonts::efontCN_24);
+            printCentered(localIpLabel().c_str(), 160, 110);
+            drawButtonLabels("", "返回", "");
+            break;
+        case Page::Password:
+            printCentered("输入标定密码", 160, 65, TFT_CYAN);
+            for (int i = 0; i < 3; ++i) {
+                const int x = 130 + i * 30;
+                display.drawCircle(x, 120, 5, TFT_CYAN);
+                if (i < static_cast<int>(passwordIndex)) {
+                    display.fillCircle(x, 120, 5, TFT_CYAN);
+                }
+            }
+            break;
+        case Page::Calibration: {
+            printCentered(editingSecond ? "舵机标定 · 4 档" : "舵机标定 · 1 档", 160, 53, TFT_CYAN);
+            const unsigned pulse = editingSecond ? draftCalibration.gearFourUs : draftCalibration.gearOneUs;
+            snprintf(value, sizeof(value), "%u us", pulse);
+            display.setFont(&fonts::FreeSansBold18pt7b);
+            printCentered(value, 160, 87);
+            display.setFont(&fonts::efontCN_16);
+            snprintf(value, sizeof(value), "占空比 %.3f%%", 100.0 * pulse / servoPeriodUs);
+            printCentered(value, 160, 135);
+            printCentered("调节时短时输出 PWM", 160, 168, TFT_LIGHTGREY);
+            drawButtonLabels("-5 us", editingSecond ? "保存" : "下一档", "+5 us");
+            break;
+        }
+        case Page::Message:
+            display.drawRoundRect(33, 78, 254, 70, 6, TFT_RED);
+            printCentered(messageText, 160, 106, TFT_RED);
+            break;
+        case Page::Home:
+            break;
+    }
 }
 
 void refreshClock(bool redraw = false) {
@@ -200,18 +379,23 @@ void refreshClock(bool redraw = false) {
     const bool minuteChanged = now / 60 != displayedSecond / 60;
     displayedSecond = now;
     static uint32_t lastRefreshMs = 0;
-    if (redraw || minuteChanged || millis() - lastRefreshMs >= 5000) {
+    const bool periodic = millis() - lastRefreshMs >= 5000;
+    if (redraw || minuteChanged || periodic) {
         lastRefreshMs = millis();
         drawHeader();
     }
-    if (redraw || minuteChanged) {
+    if (page != Page::Home) {
+        if (redraw || (periodic && (page == Page::Wifi || page == Page::Settings))) {
+            drawMenu();
+        }
+    } else if (redraw || minuteChanged) {
         drawMeasurements();
         drawFooter();
     }
 }
 
 void drawScreen(const char* status) {
-    snprintf(screenStatus, sizeof(screenStatus), "%s", status);
+    Serial.printf("[STATUS] %s\n", status);
     refreshClock(true);
 }
 
@@ -259,24 +443,40 @@ void updateConnectivity() {
     }
 }
 
-void changeTarget(int adjustment) {
-    const int changed = constrain(targetTenths + adjustment, 100, 300);
+bool saveTarget(int changed) {
     if (changed == targetTenths) {
-        return;
+        return true;
     }
-    targetTenths = changed;
     Preferences preferences;
     bool saved = false;
     if (preferences.begin("nuanshi", false)) {
-        saved = preferences.putInt("target", targetTenths) == sizeof(int32_t);
+        saved = preferences.putInt("target", changed) == sizeof(int32_t);
         preferences.end();
     }
+    if (saved) {
+        targetTenths = changed;
+    }
     char line[64];
-    snprintf(line, sizeof(line), "Target set temperature=%.1f C saved=%s", targetTenths / 10.0f,
+    snprintf(line, sizeof(line), "Target set temperature=%.1f C saved=%s", changed / 10.0f,
              saved ? "yes" : "no");
     Serial.printf("[SET] %s\n", line);
     logEvent(line);
     drawMeasurements();
+    return saved;
+}
+
+bool saveSetting(const char* key, uint32_t value, const char* event) {
+    Preferences preferences;
+    bool saved = false;
+    if (preferences.begin("nuanshi", false)) {
+        saved = preferences.putUInt(key, value) == sizeof(value);
+        preferences.end();
+    }
+    char line[112];
+    snprintf(line, sizeof(line), "%s saved=%s", event, saved ? "yes" : "no");
+    Serial.printf("[SET] %s\n", line);
+    logEvent(line);
+    return saved;
 }
 
 void scanWifi() {
@@ -438,30 +638,233 @@ void scanBle() {
     drawScreen(bleCount > 0 ? "BLE RX OK" : "No BLE devices seen");
 }
 
-void startServoPulse() {
-    const uint16_t pulseUs = servoPulses[nextPulse];
+bool outputServoPulse(uint16_t pulseUs, bool preview) {
     const uint32_t duty = (static_cast<uint32_t>(pulseUs) * (1UL << servoResolution) + servoPeriodUs / 2) / servoPeriodUs;
     const double frequency = ledcSetup(servoChannel, servoFrequency, servoResolution);
     if (frequency <= 0) {
         Serial.println("[PWM] configuration failed");
-        drawScreen("PWM setup failed");
-        return;
+        return false;
     }
     ledcAttachPin(servoPin, servoChannel);
     ledcWrite(servoChannel, duty);
     servoStarted = millis();
     servoActive = true;
+    servoPreview = preview;
+    Serial.printf("[PWM] %sGPIO%u freq=%.2f Hz pulse=%u us duty=%lu\n", preview ? "calibration " : "",
+                  servoPin, frequency, pulseUs, static_cast<unsigned long>(ledcRead(servoChannel)));
+    return true;
+}
+
+void stopServoPulse() {
+    ledcWrite(servoChannel, 0);
+    ledcDetachPin(servoPin);
+    pinMode(servoPin, OUTPUT);
+    digitalWrite(servoPin, LOW);
+    servoActive = false;
+    Serial.println("[PWM] output stopped");
+    if (!servoPreview) {
+        logEvent("PWM test completed");
+    }
+}
+
+void startServoPulse() {
+    const uint16_t pulseUs = servoPulses[nextPulse];
+    if (!outputServoPulse(pulseUs, false)) {
+        drawScreen("PWM setup failed");
+        return;
+    }
     nextPulse = (nextPulse + 1) % (sizeof(servoPulses) / sizeof(servoPulses[0]));
     // Enable pad readback without changing the GPIO matrix output from LEDC.
     gpio_ll_input_enable(&GPIO, static_cast<gpio_num_t>(servoPin));
     const unsigned long highUs = pulseIn(servoPin, HIGH, 60000);
     const unsigned long lowUs = pulseIn(servoPin, LOW, 60000);
-    Serial.printf("[PWM] GPIO%u freq=%.2f Hz pulse=%u us duty=%lu\n", servoPin, frequency, pulseUs,
-                  static_cast<unsigned long>(ledcRead(servoChannel)));
     Serial.printf("[PWM] pad high=%lu us low=%lu us\n", highUs, lowUs);
     char status[32];
     snprintf(status, sizeof(status), "PWM GPIO%u: %u us", servoPin, pulseUs);
     drawScreen(status);
+}
+
+void openPage(Page next) {
+    if (page == Page::Calibration && next != page && servoActive && servoPreview) {
+        stopServoPulse();
+    }
+    page = next;
+    pageActivity = millis();
+    refreshClock(true);
+}
+
+void showMessage(const char* message, Page returnPage) {
+    messageText = message;
+    messageReturn = returnPage;
+    openPage(Page::Message);
+}
+
+void openSelectedSetting() {
+    const Page next = settingsPages[selectedSetting];
+    editingSecond = false;
+    passwordIndex = 0;
+    draftValue = next == Page::Target ? targetTenths : lowGearTenths;
+    draftSchedule = schedule;
+    draftCalibration = calibration.valid() ? calibration : Calibration{1300, 1700};
+    openPage(next);
+}
+
+void handleMenuKey(char key) {
+    char event[100];
+    bool saved;
+    switch (page) {
+        case Page::Home:
+            if (key == 'B') {
+                selectedSetting = 0;
+                openPage(Page::Settings);
+            } else {
+                openPage(Page::About);
+            }
+            return;
+        case Page::Settings: {
+            if (key == 'B') {
+                openSelectedSetting();
+                return;
+            }
+            selectedSetting = (selectedSetting + (key == 'A' ? -1 : 1) + settingsCount) % settingsCount;
+            break;
+        }
+        case Page::Target:
+            if (key == 'B') {
+                if (saveTarget(draftValue)) openPage(Page::Settings);
+                else showMessage("保存失败", Page::Target);
+                return;
+            }
+            draftValue = constrain(draftValue + (key == 'A' ? -5 : 5), 100, 300);
+            break;
+        case Page::Schedule:
+            if (key != 'B') {
+                auto& minutes = editingSecond ? draftSchedule.end : draftSchedule.start;
+                minutes = (minutes + (key == 'A' ? -5 : 5) + minutesPerDay) % minutesPerDay;
+            } else if (!editingSecond) {
+                editingSecond = true;
+            } else {
+                snprintf(event, sizeof(event), "Heating schedule start=%02u:%02u end=%02u:%02u",
+                         static_cast<unsigned>(draftSchedule.start / 60), static_cast<unsigned>(draftSchedule.start % 60),
+                         static_cast<unsigned>(draftSchedule.end / 60), static_cast<unsigned>(draftSchedule.end % 60));
+                saved = saveSetting("schedule", (uint32_t{draftSchedule.start} << 16) | draftSchedule.end, event);
+                if (saved) {
+                    schedule = draftSchedule;
+                    openPage(Page::Settings);
+                } else {
+                    showMessage("保存失败", Page::Schedule);
+                }
+                return;
+            }
+            break;
+        case Page::LowGear:
+            if (key != 'C') {
+                draftValue = constrain(draftValue + (key == 'A' ? -1 : 1), 5, 30);
+                break;
+            }
+            snprintf(event, sizeof(event), "Low heating gear=%.1f", draftValue / 10.0f);
+            if (saveSetting("low-gear", draftValue, event)) {
+                lowGearTenths = draftValue;
+                openPage(Page::Settings);
+            } else {
+                showMessage("保存失败", Page::LowGear);
+            }
+            return;
+        case Page::Wifi:
+            if (key == 'B') openPage(Page::Settings);
+            return;
+        case Page::Password:
+            if (key != "ABC"[passwordIndex]) {
+                showMessage("密码错误", Page::Settings);
+                return;
+            }
+            if (++passwordIndex == 3) {
+                openPage(Page::Calibration);
+                return;
+            }
+            break;
+        case Page::Calibration:
+            if (key != 'B') {
+                auto& pulse = editingSecond ? draftCalibration.gearFourUs : draftCalibration.gearOneUs;
+                const int adjusted = constrain(pulse + (key == 'A' ? -calibrationStepUs : calibrationStepUs),
+                                               minCalibrationUs, maxCalibrationUs);
+                if (!outputServoPulse(adjusted, true)) {
+                    showMessage("PWM 输出失败", Page::Calibration);
+                    return;
+                }
+                pulse = adjusted;
+            } else if (!editingSecond) {
+                if (servoActive && servoPreview) stopServoPulse();
+                editingSecond = true;
+            } else if (!draftCalibration.valid()) {
+                showMessage("两档脉宽不能相同", Page::Calibration);
+                return;
+            } else {
+                snprintf(event, sizeof(event), "Servo calibration gear1=%d gear2=%d gear3=%d gear4=%d us",
+                         draftCalibration.pulseAt(10), draftCalibration.pulseAt(20),
+                         draftCalibration.pulseAt(30), draftCalibration.pulseAt(40));
+                saved = saveSetting("calibration", (uint32_t{draftCalibration.gearOneUs} << 16) |
+                                    draftCalibration.gearFourUs, event);
+                if (saved) {
+                    calibration = draftCalibration;
+                    openPage(Page::Settings);
+                } else {
+                    showMessage("保存失败", Page::Calibration);
+                }
+                return;
+            }
+            break;
+        case Page::About:
+        case Page::Message:
+            return;
+    }
+    drawMenu();
+}
+
+void updateMenu() {
+    const uint32_t now = millis();
+    const uint32_t idle = now - pageActivity;
+    const bool bReleased = M5.BtnB.wasReleased();
+    const bool ignoreB = suppressBRelease;
+    if (bReleased) {
+        suppressBRelease = false;
+    }
+    if (page == Page::Message) {
+        if (idle >= messageTimeoutMs) openPage(messageReturn);
+        return;
+    }
+    if (page == Page::About) {
+        if (idle >= menuTimeoutMs) openPage(Page::Home);
+        return;
+    }
+    const bool bHeld = M5.BtnB.pressedFor(backHoldMs);
+    const bool bLongRelease = M5.BtnB.wasReleaseFor(backHoldMs);
+    if (page != Page::Home && !ignoreB && (bHeld || bLongRelease)) {
+        suppressBRelease = bHeld;
+        openPage(Page::Home);
+        return;
+    }
+    if (page != Page::Home && idle >= menuTimeoutMs) {
+        openPage(Page::Home);
+        return;
+    }
+    if (page == Page::Password && M5.BtnA.isPressed() + M5.BtnB.isPressed() + M5.BtnC.isPressed() > 1) {
+        showMessage("密码错误", Page::Settings);
+        return;
+    }
+    if (M5.BtnA.wasPressed() || M5.BtnB.wasPressed() || M5.BtnC.wasPressed()) {
+        pageActivity = now;
+    }
+    if (M5.BtnA.wasReleased()) {
+        handleMenuKey('A');
+    } else if (bReleased && !ignoreB && !bLongRelease) {
+        handleMenuKey('B');
+    } else if (M5.BtnC.wasReleased()) {
+        handleMenuKey('C');
+    } else {
+        return;
+    }
+    pageActivity = millis();
 }
 
 void reportBoard() {
@@ -485,6 +888,17 @@ void setup() {
     if (preferences.begin("nuanshi", true)) {
         targetWasStored = preferences.isKey("target");
         targetTenths = constrain(preferences.getInt("target", 220), 100, 300);
+        const uint32_t storedSchedule = preferences.getUInt("schedule", 0xFFFFFFFF);
+        const HeatingSchedule loadedSchedule{static_cast<uint16_t>(storedSchedule >> 16),
+                                             static_cast<uint16_t>(storedSchedule)};
+        if (loadedSchedule.start < minutesPerDay && loadedSchedule.end < minutesPerDay) {
+            schedule = loadedSchedule;
+        }
+        lowGearTenths = constrain(static_cast<int>(preferences.getUInt("low-gear", 10)), 5, 30);
+        const uint32_t storedCalibration = preferences.getUInt("calibration", 0);
+        const Calibration loadedCalibration{static_cast<uint16_t>(storedCalibration >> 16),
+                                            static_cast<uint16_t>(storedCalibration)};
+        if (loadedCalibration.valid()) calibration = loadedCalibration;
         preferences.end();
     }
     pinMode(servoPin, OUTPUT);
@@ -513,19 +927,12 @@ void setup() {
 
 void loop() {
     M5.update();
+    if (servoActive && millis() - servoStarted >= servoHoldMs) {
+        stopServoPulse();
+    }
+    updateMenu();
     const int command = servoActive ? -1 : Serial.read();
-    if (servoActive) {
-        if (millis() - servoStarted >= servoHoldMs) {
-            ledcWrite(servoChannel, 0);
-            ledcDetachPin(servoPin);
-            pinMode(servoPin, OUTPUT);
-            digitalWrite(servoPin, LOW);
-            servoActive = false;
-            Serial.println("[PWM] output stopped");
-            logEvent("PWM test completed");
-            drawScreen("PWM output stopped");
-        }
-    } else if (command == 'n') {
+    if (command == 'n') {
         // Frame: 'n', SSID length, password length, then both byte strings.
         WifiCredentials credentials;
         if (readCredentials(Serial, credentials)) {
@@ -560,17 +967,12 @@ void loop() {
         scanWifi();
     } else if (command == 'b') {
         scanBle();
-    } else if (command == 'p') {
+    } else if (command == 'p' && page == Page::Home) {
         startServoPulse();
     } else if (command == '?') {
         reportBoard();
-    } else if (M5.BtnA.wasPressed() || command == '-') {
-        changeTarget(-5);
-    } else if (M5.BtnC.wasPressed() || command == '+') {
-        changeTarget(5);
-    } else if (M5.BtnB.wasPressed()) {
-        settingsOpen = !settingsOpen;
-        drawFooter();
+    } else if (command == '-' || command == '+') {
+        saveTarget(constrain(targetTenths + (command == '-' ? -5 : 5), 100, 300));
     }
     if (!servoActive) {
         pollMijia();
