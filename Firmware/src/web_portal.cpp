@@ -11,6 +11,7 @@
 namespace {
 constexpr uint32_t sessionLifetimeMs = 3600000;
 constexpr uint32_t loginRetryMs = 1000;
+constexpr size_t logPreviewBytes = 8 * 1024;
 constexpr char passwordHash[] = "0000000000000000000000000000000000000000000000000000000000000000";
 WebServer server(80);
 String session;
@@ -36,6 +37,8 @@ input,button,a.button{font:inherit;padding:8px 10px;border-radius:6px;border:1px
 input[type=number]{width:5.5rem}button,a.button{cursor:pointer;text-decoration:none;display:inline-block}
 button:hover,a.button:hover{border-color:#7ed8e6}button.danger,.danger{color:#ff9c9a}.warn{color:#ffd18f}.good{color:#8fddd1}
 .actions{display:flex;gap:12px;flex-wrap:wrap}.actions form{display:inline}
+#log-preview{background:#111d28;border:1px solid #2c4150;border-radius:6px;padding:12px;margin:14px 0 8px;
+max-height:20rem;overflow:auto;white-space:pre-wrap;overflow-wrap:anywhere;font:0.83rem/1.55 ui-monospace,monospace}
 </style><main><h1>暖时</h1>)HTML";
 
 void responseHeaders() {
@@ -212,10 +215,20 @@ void dashboard() {
     html += F("<label>低温加热档位 <input type=number name=value min=0.5 max=3 step=0.1 required value=");
     html += String(data.lowGearTenths / 10.0f, 1);
     html += F("></label><button>保存</button></form></section>"
-              "<section><h2>SD 日志</h2><div class=actions><a class=button href=/nuanshi.log>下载日志</a>");
+              "<section><h2>系统日志</h2><div class=actions><a class=button href=/nuanshi.log>下载日志</a>");
     addForm(html, "/logs/delete");
-    html += F("<button class=danger onclick=\"return confirm('删除当前 SD 日志？此操作不可撤销。')\">删除日志</button>"
-              "</form></div></section><script>"
+    html += F("<button class=danger onclick=\"return confirm('删除当前系统日志？此操作不可撤销。')\">删除日志</button>"
+              "</form></div><pre id=log-preview tabindex=0 aria-label=\"最新系统日志\">正在读取日志…</pre>"
+              "<small>预览文件末尾，完整记录可下载。</small></section><script>"
+              "const preview=document.getElementById('log-preview');"
+              "async function updateLog(){if(document.hidden)return;try{"
+              "const r=await fetch('/logs/preview');if(r.status===401){location.reload();return;}"
+              "const text=await r.text()||'暂无系统日志。';if(text===preview.textContent)return;"
+              "const atEnd=preview.scrollHeight-preview.clientHeight-preview.scrollTop<4;"
+              "preview.textContent=text;if(atEnd)preview.scrollTop=preview.scrollHeight;"
+              "}catch{preview.textContent='日志读取失败，稍后自动重试。'}}"
+              "updateLog();setInterval(updateLog,30000);"
+              "document.addEventListener('visibilitychange',updateLog);"
               "setInterval(async()=>{try{const r=await fetch('/status');"
               "if(r.ok)document.getElementById('status').innerHTML=await r.text();"
               "else if(r.status===401)location.reload()}catch{}},10000)"
@@ -251,6 +264,56 @@ int parseTime(const String& value) {
 void saveResult(bool success) {
     if (success) redirectHome();
     else sendText(500, "保存设置失败。");
+}
+
+bool readLogTail(File& log, String& preview) {
+    const size_t fileSize = log.size();
+    size_t remaining = min(fileSize, logPreviewBytes);
+    const size_t start = fileSize - remaining;
+    bool skipPartialLine = false;
+    if (start > 0) {
+        if (!log.seek(start - 1)) return false;
+        const int before = log.read();
+        if (before < 0) return false;
+        skipPartialLine = before != '\n';
+    }
+    if (!preview.reserve(remaining)) return false;
+    char block[257];
+    while (remaining > 0) {
+        const size_t count = log.readBytes(block, min(remaining, sizeof(block) - 1));
+        if (count == 0) return false;
+        block[count] = '\0';
+        remaining -= count;
+        const char* data = block;
+        if (skipPartialLine) {
+            const auto* newline = static_cast<const char*>(memchr(block, '\n', count));
+            if (!newline) continue;
+            data = newline + 1;
+            skipPartialLine = false;
+        }
+        if (data != block + count && !preview.concat(data, block + count - data)) return false;
+    }
+    return true;
+}
+
+void sendLogPreview() {
+    if (!requireLogin()) return;
+    if (!readStatus().sdMounted) {
+        sendText(503, "SD 卡未挂载。");
+        return;
+    }
+    File log = openEventLog();
+    if (!log) {
+        sendText(404, "暂无系统日志。");
+        return;
+    }
+    String preview;
+    if (!readLogTail(log, preview)) {
+        sendText(503, "系统日志暂时无法读取。");
+        return;
+    }
+    responseHeaders();
+    server.send(200, "text/plain; charset=utf-8", preview);
 }
 }  // namespace
 
@@ -308,6 +371,7 @@ void startWebPortal(PortalStatus (*status)(), bool (*target)(int),
         server.sendHeader("Content-Disposition", "attachment; filename=nuanshi.log");
         server.streamFile(log, "text/plain; charset=utf-8");
     });
+    server.on("/logs/preview", HTTP_GET, sendLogPreview);
     server.on("/logs/delete", HTTP_POST, []() {
         if (!requireFormToken()) return;
         if (!deleteEventLog()) {
