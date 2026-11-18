@@ -26,8 +26,8 @@ constexpr unsigned trendSamples = 6;  // Roughly ten minutes at the normal sampl
 constexpr uint32_t menuTimeoutMs = 10000;
 constexpr uint32_t messageTimeoutMs = 3000;
 constexpr uint32_t backHoldMs = 800;
-constexpr uint32_t calibrationRepeatDelayMs = 400;
-constexpr uint32_t calibrationRepeatIntervalMs = 100;
+constexpr uint32_t adjustmentRepeatDelayMs = 400;
+constexpr uint32_t adjustmentRepeatIntervalMs = 100;
 constexpr int minutesPerDay = 24 * 60;
 constexpr int minCalibrationUs = 1000;
 constexpr int maxCalibrationUs = 2000;
@@ -98,8 +98,8 @@ constexpr char calibrationPassword[] = "ACB";
 bool passwordMatches = true;
 bool passwordChord = false;
 bool suppressBRelease = false;
-char repeatingCalibrationKey = '\0';
-uint32_t lastCalibrationStepMs = 0;
+char repeatingAdjustmentKey = '\0';
+uint32_t lastAdjustmentMs = 0;
 bool editingSecond = false;
 int draftValue = 0;
 HeatingSchedule draftSchedule{};
@@ -287,11 +287,51 @@ void drawCalibrationValue() {
     printCentered(value, 160, 135);
 }
 
+void drawDraftTemperatureOrGear(bool target) {
+    auto& display = M5.Display;
+    display.fillRect(0, 90, 320, 96, TFT_BLACK);
+    char value[32];
+    snprintf(value, sizeof(value), "%.1f", draftValue / 10.0f);
+    display.setFont(&fonts::FreeSansBold24pt7b);
+    if (target) {
+        printTemperature(value, 160 - (display.textWidth(value) + 26) / 2, 96);
+        return;
+    }
+    printCentered(value, 160, 96);
+    display.setFont(&fonts::efontCN_16);
+    if (!calibration.valid()) {
+        printCentered("舵机尚未标定", 160, 160, TFT_LIGHTGREY);
+        return;
+    }
+    const int pulse = calibration.pulseAt(draftValue);
+    if (pulse >= minCalibrationUs && pulse <= maxCalibrationUs) {
+        snprintf(value, sizeof(value), "%d us / %.3f%%", pulse, 100.0 * pulse / servoPeriodUs);
+        printCentered(value, 160, 160, TFT_LIGHTGREY);
+    } else {
+        printCentered("超出标定脉宽范围", 160, 160, TFT_ORANGE);
+    }
+}
+
+void drawDraftSchedule() {
+    auto& display = M5.Display;
+    display.fillRect(0, 90, 320, 96, TFT_BLACK);
+    display.setFont(&fonts::efontCN_16);
+    char start[6], end[6], value[32];
+    formatTime(start, sizeof(start), draftSchedule.start);
+    formatTime(end, sizeof(end), draftSchedule.end);
+    snprintf(value, sizeof(value), "起始时间  %s", start);
+    printCentered(value, 160, 95, editingSecond ? TFT_LIGHTGREY : TFT_CYAN);
+    snprintf(value, sizeof(value), "截止时间  %s", end);
+    printCentered(value, 160, 127, editingSecond ? TFT_CYAN : TFT_LIGHTGREY);
+    if (draftSchedule.end < draftSchedule.start) {
+        printCentered("截止时间为次日", 160, 166, TFT_LIGHTGREY);
+    }
+}
+
 void drawMenu() {
     auto& display = M5.Display;
     display.fillRect(0, 31, 320, 209, TFT_BLACK);
     display.setFont(&fonts::efontCN_16);
-    char value[32];
     switch (page) {
         case Page::About:
             printCentered("暖时", 160, 56, TFT_CYAN);
@@ -328,43 +368,17 @@ void drawMenu() {
         case Page::LowGear: {
             const bool target = page == Page::Target;
             printCentered(target ? "目标温度" : "低温加热档位", 160, 53, TFT_CYAN);
-            snprintf(value, sizeof(value), "%.1f", draftValue / 10.0f);
-            display.setFont(&fonts::FreeSansBold24pt7b);
-            if (target) {
-                printTemperature(value, 160 - (display.textWidth(value) + 26) / 2, 96);
-            } else {
-                printCentered(value, 160, 96);
-                display.setFont(&fonts::efontCN_16);
-                if (calibration.valid()) {
-                    const int pulse = calibration.pulseAt(draftValue);
-                    if (pulse >= minCalibrationUs && pulse <= maxCalibrationUs) {
-                        snprintf(value, sizeof(value), "%d us / %.3f%%", pulse, 100.0 * pulse / servoPeriodUs);
-                        printCentered(value, 160, 160, TFT_LIGHTGREY);
-                    } else {
-                        printCentered("超出标定脉宽范围", 160, 160, TFT_ORANGE);
-                    }
-                } else {
-                    printCentered("舵机尚未标定", 160, 160, TFT_LIGHTGREY);
-                }
-            }
-            drawButtonLabels(target ? "-0.5 °C" : "-0.1", target ? "保存" : "+0.1", target ? "+0.5 °C" : "保存");
+            drawDraftTemperatureOrGear(target);
+            printCentered("长按 A / C 连调", 160, 195, TFT_LIGHTGREY);
+            drawButtonLabels(target ? "-0.5 °C" : "-0.1", "保存", target ? "+0.5 °C" : "+0.1");
             break;
         }
-        case Page::Schedule: {
+        case Page::Schedule:
             printCentered("采暖时段", 160, 53, TFT_CYAN);
-            char start[6], end[6];
-            formatTime(start, sizeof(start), draftSchedule.start);
-            formatTime(end, sizeof(end), draftSchedule.end);
-            snprintf(value, sizeof(value), "起始时间  %s", start);
-            printCentered(value, 160, 95, editingSecond ? TFT_LIGHTGREY : TFT_CYAN);
-            snprintf(value, sizeof(value), "截止时间  %s", end);
-            printCentered(value, 160, 127, editingSecond ? TFT_CYAN : TFT_LIGHTGREY);
-            if (draftSchedule.end < draftSchedule.start) {
-                printCentered("截止时间为次日", 160, 166, TFT_LIGHTGREY);
-            }
+            drawDraftSchedule();
+            printCentered("长按 A / C 连调", 160, 195, TFT_LIGHTGREY);
             drawButtonLabels("-5 分", editingSecond ? "保存" : "下一项", "+5 分");
             break;
-        }
         case Page::Wifi:
             printCentered("WiFi IP", 160, 59, TFT_CYAN);
             display.setFont(&fonts::efontCN_24);
@@ -770,17 +784,28 @@ void handleMenuKey(char key) {
             break;
         }
         case Page::Target:
+        case Page::LowGear: {
+            const bool target = page == Page::Target;
             if (key == 'B') {
-                if (saveTarget(draftValue)) openPage(Page::Settings);
-                else showMessage("保存失败", Page::Target);
+                const bool stored = target ? saveTarget(draftValue) : saveLowGear(draftValue);
+                if (stored) openPage(Page::Settings);
+                else showMessage("保存失败", page);
                 return;
             }
-            draftValue = constrain(draftValue + (key == 'A' ? -5 : 5), 100, 300);
-            break;
+            const int step = target ? 5 : 1;
+            const int adjusted = constrain(draftValue + (key == 'A' ? -step : step), target ? 100 : 5, target ? 300 : 30);
+            if (adjusted != draftValue) {
+                draftValue = adjusted;
+                drawDraftTemperatureOrGear(target);
+            }
+            return;
+        }
         case Page::Schedule:
             if (key != 'B') {
                 auto& minutes = editingSecond ? draftSchedule.end : draftSchedule.start;
                 minutes = (minutes + (key == 'A' ? -5 : 5) + minutesPerDay) % minutesPerDay;
+                drawDraftSchedule();
+                return;
             } else if (!editingSecond) {
                 editingSecond = true;
             } else {
@@ -789,14 +814,6 @@ void handleMenuKey(char key) {
                 return;
             }
             break;
-        case Page::LowGear:
-            if (key != 'C') {
-                draftValue = constrain(draftValue + (key == 'A' ? -1 : 1), 5, 30);
-                break;
-            }
-            if (saveLowGear(draftValue)) openPage(Page::Settings);
-            else showMessage("保存失败", Page::LowGear);
-            return;
         case Page::Wifi:
             if (key == 'B') openPage(Page::Settings);
             return;
@@ -856,10 +873,10 @@ void updateMenu() {
     const bool ignoreB = suppressBRelease;
     const bool aReleased = M5.BtnA.wasReleased();
     const bool cReleased = M5.BtnC.wasReleased();
-    const bool repeatedA = aReleased && repeatingCalibrationKey == 'A';
-    const bool repeatedC = cReleased && repeatingCalibrationKey == 'C';
+    const bool repeatedA = aReleased && repeatingAdjustmentKey == 'A';
+    const bool repeatedC = cReleased && repeatingAdjustmentKey == 'C';
     if (repeatedA || repeatedC) {
-        repeatingCalibrationKey = '\0';
+        repeatingAdjustmentKey = '\0';
     }
     if (bReleased) {
         suppressBRelease = false;
@@ -897,15 +914,17 @@ void updateMenu() {
             return;
         }
     }
-    if (page == Page::Calibration && (aDown || cDown)) {
+    const bool adjustable = page == Page::Target || page == Page::Schedule ||
+                            page == Page::LowGear || page == Page::Calibration;
+    if (adjustable && (aDown || cDown)) {
         if (aDown != cDown && !bDown) {
             const char key = aDown ? 'A' : 'C';
             const auto& button = aDown ? M5.BtnA : M5.BtnC;
-            const bool firstRepeat = repeatingCalibrationKey == '\0' && button.pressedFor(calibrationRepeatDelayMs);
-            const bool nextRepeat = repeatingCalibrationKey == key && now - lastCalibrationStepMs >= calibrationRepeatIntervalMs;
+            const bool firstRepeat = repeatingAdjustmentKey == '\0' && button.pressedFor(adjustmentRepeatDelayMs);
+            const bool nextRepeat = repeatingAdjustmentKey == key && now - lastAdjustmentMs >= adjustmentRepeatIntervalMs;
             if (firstRepeat || nextRepeat) {
-                repeatingCalibrationKey = key;
-                lastCalibrationStepMs = now;
+                repeatingAdjustmentKey = key;
+                lastAdjustmentMs = now;
                 handleMenuKey(key);
                 pageActivity = millis();
             }
