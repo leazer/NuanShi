@@ -20,6 +20,9 @@ constexpr uint32_t servoFrequency = 50;
 constexpr uint32_t servoPeriodUs = 1000000 / servoFrequency;
 constexpr uint32_t servoHoldMs = 1500;
 constexpr uint16_t servoPulses[] = {1500, 1300, 1700};
+constexpr uint32_t indoorStaleMs = mijiaSampleIntervalMs + 60 * 1000;
+constexpr uint32_t indoorLostMs = mijiaSampleIntervalMs + 3 * 60 * 1000;
+constexpr unsigned trendSamples = 6;  // Roughly ten minutes at the normal sample interval.
 
 int wifiCount = -1;
 int bleCount = -1;
@@ -38,7 +41,7 @@ bool mijiaAddressPending = false;
 float indoorTemperature = NAN;
 uint32_t indoorUpdatedMs = 0;
 unsigned sensorFailures = 0;
-float temperatureHistory[3] = {};
+float temperatureHistory[trendSamples] = {};
 unsigned readingsInHistory = 0;
 unsigned nextHistoryIndex = 0;
 int targetTenths = 220;
@@ -102,18 +105,31 @@ void logEvent(const char* event) {
 }
 
 const char* roomTrend() {
-    if (readingsInHistory < 3) {
+    if (readingsInHistory < trendSamples) {
         return "趋势采集中";
     }
-    const float change = temperatureHistory[(nextHistoryIndex + 2) % 3] - temperatureHistory[nextHistoryIndex];
+    const unsigned mostRecent = (nextHistoryIndex + trendSamples - 1) % trendSamples;
+    const float change = temperatureHistory[mostRecent] - temperatureHistory[nextHistoryIndex];
     return change > 0.2f ? "室温上升中" : change < -0.2f ? "室温下降中" : "室温平稳";
 }
 
+bool roomHasAged(uint32_t thresholdMs) {
+    return !isnan(indoorTemperature) && millis() - indoorUpdatedMs >= thresholdMs;
+}
+
+bool roomLost() {
+    return sensorFailures >= mijiaMaxAttempts || roomHasAged(indoorLostMs);
+}
+
+bool roomStale() {
+    return sensorFailures > 0 || roomHasAged(indoorStaleMs);
+}
+
 const char* roomState() {
-    if (sensorFailures >= 3 || (!isnan(indoorTemperature) && millis() - indoorUpdatedMs >= 480000)) {
+    if (roomLost()) {
         return "温度计失联";
     }
-    if (sensorFailures || (!isnan(indoorTemperature) && millis() - indoorUpdatedMs >= 360000)) {
+    if (roomStale()) {
         return "室温过期 · 重试中";
     }
     return isnan(indoorTemperature) ? "等待温度计" : roomTrend();
@@ -125,9 +141,7 @@ void drawMeasurements() {
     display.setFont(&fonts::efontCN_16);
     printAt("目标温度", 14, 38, TFT_CYAN);
     printAt("室外温度", 14, 102, TFT_LIGHTGREY);
-    const bool stale = sensorFailures || (!isnan(indoorTemperature) && millis() - indoorUpdatedMs >= 360000);
-    const bool lost = sensorFailures >= 3 || (!isnan(indoorTemperature) && millis() - indoorUpdatedMs >= 480000);
-    const uint16_t roomColor = lost ? TFT_RED : stale ? TFT_ORANGE : TFT_WHITE;
+    const uint16_t roomColor = roomLost() ? TFT_RED : roomStale() ? TFT_ORANGE : TFT_WHITE;
     printAt("室内温度", 157, 42, roomColor);
 
     char value[20];
@@ -173,7 +187,7 @@ void drawFooter() {
         printAt(screenStatus, 12, 195, TFT_LIGHTGREY);
     } else {
         printAt("观测模式", 12, 176, TFT_CYAN);
-        printAt(roomState(), 100, 176, sensorFailures >= 3 ? TFT_RED : sensorFailures ? TFT_ORANGE : TFT_WHITE);
+        printAt(roomState(), 100, 176, roomLost() ? TFT_RED : roomStale() ? TFT_ORANGE : TFT_WHITE);
     }
     // Screen coordinates of the three key centers, measured from the panel photo.
     printCentered("-0.5 °C", 72, 220);
@@ -368,8 +382,8 @@ void pollMijia() {
     if (sample.failedAttempts) {
         sensorFailures = max(sensorFailures, sample.failedAttempts);
         char line[76];
-        snprintf(line, sizeof(line), "Mijia attempt=%u/3 failed code=%d state=%s", sample.failedAttempts,
-                 sample.error, sensorFailures >= 3 ? "offline" : "retrying");
+        snprintf(line, sizeof(line), "Mijia attempt=%u/%u failed code=%d state=%s", sample.failedAttempts,
+                 mijiaMaxAttempts, sample.error, roomLost() ? "offline" : "retrying");
         Serial.printf("[MIJIA] %s\n", line);
         logEvent(line);
         drawMeasurements();
@@ -389,8 +403,8 @@ void pollMijia() {
     indoorTemperature = reading.temperature;
     indoorUpdatedMs = millis();
     temperatureHistory[nextHistoryIndex] = reading.temperature;
-    nextHistoryIndex = (nextHistoryIndex + 1) % 3;
-    readingsInHistory = min(readingsInHistory + 1, 3U);
+    nextHistoryIndex = (nextHistoryIndex + 1) % trendSamples;
+    readingsInHistory = min(readingsInHistory + 1, trendSamples);
     char line[140];
     snprintf(line, sizeof(line), "Mijia temperature=%.2f C humidity=%u %% battery=%u mV target=%.1f C outdoor=%.1f C mode=observe trend=%s",
              reading.temperature, reading.humidity, reading.batteryMillivolts, targetTenths / 10.0f,

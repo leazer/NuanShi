@@ -7,9 +7,7 @@
 namespace {
 constexpr char serviceId[] = "ebe0ccb0-7a0a-4b0c-8a1a-6ff2997da3a6";
 constexpr char measurementId[] = "ebe0ccc1-7a0a-4b0c-8a1a-6ff2997da3a6";
-constexpr unsigned sampleIntervalMs = 300000;
 constexpr unsigned retryDelayMs = 10000;
-constexpr unsigned maxAttempts = 3;
 
 uint8_t sensorAddress[mijiaAddressSize] = {};
 QueueHandle_t readings = nullptr;
@@ -50,6 +48,7 @@ void readSensor(void*) {
     const NimBLEAddress target(mac, BLE_ADDR_PUBLIC);
     unsigned failedAttempts = 0;
     for (;;) {
+        TickType_t attemptStarted = xTaskGetTickCount();
         ulTaskNotifyTake(pdTRUE, 0);
         MijiaSample sample{};
         bool received = false;
@@ -78,11 +77,12 @@ void readSensor(void*) {
             sample.failedAttempts = ++failedAttempts;
         }
         xQueueSend(outcomes, &sample, portMAX_DELAY);
-        const bool retry = failedAttempts > 0 && failedAttempts < maxAttempts;
-        if (!retry) {
+        if (failedAttempts > 0 && failedAttempts < mijiaMaxAttempts) {
+            vTaskDelay(pdMS_TO_TICKS(retryDelayMs));
+        } else {
             failedAttempts = 0;
+            vTaskDelayUntil(&attemptStarted, pdMS_TO_TICKS(mijiaSampleIntervalMs));
         }
-        vTaskDelay(pdMS_TO_TICKS(retry ? retryDelayMs : sampleIntervalMs));
     }
 }
 }  // namespace

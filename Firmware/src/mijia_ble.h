@@ -4,6 +4,8 @@
 #include <stdint.h>
 
 constexpr size_t mijiaAddressSize = 6;
+constexpr uint32_t mijiaSampleIntervalMs = 2 * 60 * 1000;
+constexpr unsigned mijiaMaxAttempts = 3;
 
 struct MijiaReading {
     float temperature;
