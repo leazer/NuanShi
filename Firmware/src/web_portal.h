@@ -13,8 +13,13 @@ struct PortalStatus {
     uint16_t heatingEnd;
     int lowGearTenths;
     bool sdMounted;
+    bool manual;
+    bool calibrated;
+    int gearTenths;
+    uint32_t epoch;
 };
 
 void startWebPortal(PortalStatus (*readStatus)(), bool (*saveTarget)(int),
-                    bool (*saveSchedule)(uint16_t, uint16_t), bool (*saveLowGear)(int));
+                    bool (*saveSchedule)(uint16_t, uint16_t), bool (*saveLowGear)(int),
+                    bool (*saveMode)(bool), bool (*applyGear)(int));
 void pollWebPortal();

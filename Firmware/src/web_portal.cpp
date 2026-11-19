@@ -7,6 +7,8 @@
 #include <mbedtls/sha256.h>
 
 #include "bench_storage.h"
+#include "temperature_chart.h"
+#include "web_history.h"
 
 namespace {
 constexpr uint32_t sessionLifetimeMs = 3600000;
@@ -23,6 +25,8 @@ PortalStatus (*readStatus)();
 bool (*saveTargetSetting)(int);
 bool (*saveHeatingSchedule)(uint16_t, uint16_t);
 bool (*saveLowHeatingGear)(int);
+bool (*saveModeSetting)(bool);
+bool (*applyManualGear)(int);
 
 constexpr char pageStart[] = R"HTML(<!doctype html><html lang="zh-CN"><meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1"><title>暖时</title>
@@ -33,10 +37,14 @@ section{background:#192734;border:1px solid #2c4150;border-radius:12px;padding:1
 dl{display:grid;grid-template-columns:auto 1fr;gap:8px 20px;margin:0}dd{margin:0;overflow-wrap:anywhere}
 dt,small{color:#b9c9d6}form{margin:0}form+form{border-top:1px solid #2c4150;padding-top:12px;margin-top:12px}
 label{display:inline-flex;align-items:center;gap:8px;margin:0 8px 8px 0}
-input,button,a.button{font:inherit;padding:8px 10px;border-radius:6px;border:1px solid #526a7b;color:inherit;background:#111d28}
+input,select,button,a.button{font:inherit;padding:8px 10px;border-radius:6px;border:1px solid #526a7b;color:inherit;background:#111d28}
 input[type=number]{width:5.5rem}button,a.button{cursor:pointer;text-decoration:none;display:inline-block}
 button:hover,a.button:hover{border-color:#7ed8e6}button.danger,.danger{color:#ff9c9a}.warn{color:#ffd18f}.good{color:#8fddd1}
+fieldset{padding:0;border:0;margin:14px 0 0;min-width:0}fieldset:disabled,button:disabled{opacity:.55;cursor:default}
 .actions{display:flex;gap:12px;flex-wrap:wrap}.actions form{display:inline}
+#temperature-chart{display:block;width:100%;height:300px;background:#111d28;border-radius:6px;touch-action:pan-y}
+.chart-key{display:flex;gap:8px 14px;flex-wrap:wrap;margin:0 0 10px;font-size:.83rem}
+#chart-note{display:block;min-height:1.25rem;margin-top:8px}
 #log-preview{background:#111d28;border:1px solid #2c4150;border-radius:6px;padding:12px;margin:14px 0 8px;
 max-height:20rem;overflow:auto;white-space:pre-wrap;overflow-wrap:anywhere;font:0.83rem/1.55 ui-monospace,monospace}
 </style><main><h1>暖时</h1>)HTML";
@@ -155,7 +163,12 @@ String temperature(float degrees) {
 String statusHtml(const PortalStatus& data) {
     String html;
     html.reserve(720);
-    html += F("<dl><dt>运行模式</dt><dd>观测模式</dd><dt>室内温度</dt><dd class=");
+    html += data.manual ? F("<dl data-mode=manual>") : F("<dl data-mode=auto>");
+    html += F("<dt>控制模式</dt><dd>");
+    html += data.manual ? "手动控制" : "自动控制 · 观测中";
+    html += F("</dd><dt>最后档位指令</dt><dd>");
+    html += data.gearTenths ? String(data.gearTenths / 10.0f, 1) + " 档" : String("暂无记录");
+    html += F("</dd><dt>室内温度</dt><dd class=");
     html += data.roomTone;
     html += '>';
     html += temperature(data.indoor);
@@ -194,11 +207,26 @@ void dashboard() {
     }
     const PortalStatus data = readStatus();
     String html;
-    html.reserve(5500);
+    html.reserve(14000);
     html += pageStart;
     html += F("<section><h2>当前状态</h2><div id=status>");
     html += statusHtml(data);
     html += F("</div></section><section><h2>设置</h2>");
+    addForm(html, "/settings/mode");
+    html += F("<label>控制模式 <select name=value><option value=auto");
+    if (!data.manual) html += F(" selected");
+    html += F(">自动控制</option><option value=manual");
+    if (data.manual) html += F(" selected");
+    html += F(">手动控制</option></select></label><button>保存</button></form>");
+    if (data.manual) {
+        addForm(html, "/control/gear");
+        html += data.calibrated ? F("<div class=actions>") : F("<fieldset disabled><div class=actions>");
+        html += F("<button name=value value=1>1 档</button><button name=value value=2>2 档</button>"
+                  "<button name=value value=3>3 档</button></div>");
+        if (!data.calibrated) html += F("</fieldset><small>请先在设备上完成舵机标定。</small>");
+        html += F("</form>");
+    }
+    html += data.manual ? F("<fieldset disabled>") : F("<fieldset>");
     addForm(html, "/settings/target");
     html += F("<label>目标温度 <input type=number name=value min=10 max=30 step=0.5 required value=");
     html += String(data.targetTenths / 10.0f, 1);
@@ -214,7 +242,12 @@ void dashboard() {
     addForm(html, "/settings/low-gear");
     html += F("<label>低温加热档位 <input type=number name=value min=0.5 max=3 step=0.1 required value=");
     html += String(data.lowGearTenths / 10.0f, 1);
-    html += F("></label><button>保存</button></form></section>"
+    html += F("></label><button>保存</button></form></fieldset></section>"
+              "<section><h2>温度曲线</h2><div class=chart-key>"
+              "<span style=color:#79dfc4>室内温度 °C</span><span style=color:#93b6ff>室外温度 °C</span>"
+              "<span style=color:#ffc885>手动档位</span><span style=color:#c7a8f1>测试档位</span></div>"
+              "<canvas id=temperature-chart aria-label=\"最近 24 小时的室温、室外温度和档位指令\"></canvas>"
+              "<small id=chart-note>正在读取温度曲线…</small></section>"
               "<section><h2>系统日志</h2><div class=actions><a class=button href=/nuanshi.log>下载日志</a>");
     addForm(html, "/logs/delete");
     html += F("<button class=danger onclick=\"return confirm('删除当前系统日志？此操作不可撤销。')\">删除日志</button>"
@@ -230,9 +263,12 @@ void dashboard() {
               "updateLog();setInterval(updateLog,30000);"
               "document.addEventListener('visibilitychange',updateLog);"
               "setInterval(async()=>{try{const r=await fetch('/status');"
-              "if(r.ok)document.getElementById('status').innerHTML=await r.text();"
+              "if(r.ok){const s=document.getElementById('status'),mode=s.firstElementChild.dataset.mode;"
+              "s.innerHTML=await r.text();if(s.firstElementChild.dataset.mode!==mode)location.reload();}"
               "else if(r.status===401)location.reload()}catch{}},10000)"
-              "</script></main></html>");
+              "</script>");
+    html += webHistoryScript;
+    html += F("</main></html>");
     responseHeaders();
     server.send(200, "text/html; charset=utf-8", html);
 }
@@ -264,6 +300,55 @@ int parseTime(const String& value) {
 void saveResult(bool success) {
     if (success) redirectHome();
     else sendText(500, "保存设置失败。");
+}
+
+bool requireAutomaticMode() {
+    if (!requireFormToken()) return false;
+    if (!readStatus().manual) return true;
+    sendText(409, "手动控制期间暂停此设置。");
+    return false;
+}
+
+void sendHistory() {
+    if (!requireLogin()) return;
+    const PortalStatus status = readStatus();
+    if (!status.sdMounted || status.epoch <= temperatureHistoryWindow) {
+        sendText(503, status.sdMounted ? "等待校准时间。" : "SD 卡未挂载。");
+        return;
+    }
+    const TemperatureRecord* records;
+    const int count = temperatureChartRecords(records);
+    if (count < 0) {
+        sendText(503, "温度曲线暂时无法读取。");
+        return;
+    }
+    const uint32_t start = status.epoch - temperatureHistoryWindow;
+    responseHeaders();
+    server.setContentLength(CONTENT_LENGTH_UNKNOWN);
+    server.send(200, "text/csv; charset=utf-8", "");
+    char chunk[768];
+    size_t used = snprintf(chunk, sizeof(chunk), "%lu,%lu\n",
+                           static_cast<unsigned long>(start), static_cast<unsigned long>(status.epoch));
+    for (int i = 0; i < count; ++i) {
+        const auto& row = records[i];
+        if (row.epoch < start || row.epoch > status.epoch) continue;
+        const bool gear = row.targetTenths == TemperatureRecord::gear || row.targetTenths == TemperatureRecord::testGear;
+        const char* type = row.targetTenths == TemperatureRecord::outdoor ? "outdoor" :
+                           row.targetTenths == TemperatureRecord::gear ? "gear" :
+                           row.targetTenths == TemperatureRecord::testGear ? "test" : "indoor";
+        char line[48];
+        const int size = snprintf(line, sizeof(line), "%lu,%s,%.*f\n", static_cast<unsigned long>(row.epoch),
+                                  type, gear ? 1 : 2, row.temperatureHundredths / (gear ? 10.0 : 100.0));
+        if (size <= 0 || static_cast<size_t>(size) >= sizeof(line)) continue;
+        if (used + size > sizeof(chunk)) {
+            server.sendContent(chunk, used);
+            used = 0;
+        }
+        memcpy(chunk + used, line, size);
+        used += size;
+    }
+    server.sendContent(chunk, used);
+    if (used) server.sendContent("", 0);
 }
 
 bool readLogTail(File& log, String& preview) {
@@ -318,11 +403,14 @@ void sendLogPreview() {
 }  // namespace
 
 void startWebPortal(PortalStatus (*status)(), bool (*target)(int),
-                    bool (*schedule)(uint16_t, uint16_t), bool (*lowGear)(int)) {
+                    bool (*schedule)(uint16_t, uint16_t), bool (*lowGear)(int),
+                    bool (*mode)(bool), bool (*manualGear)(int)) {
     readStatus = status;
     saveTargetSetting = target;
     saveHeatingSchedule = schedule;
     saveLowHeatingGear = lowGear;
+    saveModeSetting = mode;
+    applyManualGear = manualGear;
     const char* headers[] = {"Cookie"};
     server.collectHeaders(headers, 1);
     server.on("/", HTTP_GET, dashboard);
@@ -333,7 +421,7 @@ void startWebPortal(PortalStatus (*status)(), bool (*target)(int),
         server.send(200, "text/html; charset=utf-8", statusHtml(readStatus()));
     });
     server.on("/settings/target", HTTP_POST, []() {
-        if (!requireFormToken()) return;
+        if (!requireAutomaticMode()) return;
         const int value = parseTenths(server.arg("value"));
         if (value < 100 || value > 300 || value % 5 != 0) {
             sendText(400, "目标温度范围为 10～30 °C，步长 0.5 °C。");
@@ -342,7 +430,7 @@ void startWebPortal(PortalStatus (*status)(), bool (*target)(int),
         saveResult(saveTargetSetting(value));
     });
     server.on("/settings/schedule", HTTP_POST, []() {
-        if (!requireFormToken()) return;
+        if (!requireAutomaticMode()) return;
         const int start = parseTime(server.arg("start"));
         const int end = parseTime(server.arg("end"));
         if (start < 0 || end < 0) {
@@ -352,7 +440,7 @@ void startWebPortal(PortalStatus (*status)(), bool (*target)(int),
         saveResult(saveHeatingSchedule(start, end));
     });
     server.on("/settings/low-gear", HTTP_POST, []() {
-        if (!requireFormToken()) return;
+        if (!requireAutomaticMode()) return;
         const int value = parseTenths(server.arg("value"));
         if (value < 5 || value > 30) {
             sendText(400, "低温加热档位范围为 0.5～3.0，步长 0.1。");
@@ -360,6 +448,31 @@ void startWebPortal(PortalStatus (*status)(), bool (*target)(int),
         }
         saveResult(saveLowHeatingGear(value));
     });
+    server.on("/settings/mode", HTTP_POST, []() {
+        if (!requireFormToken()) return;
+        const String value = server.arg("value");
+        if (value != "auto" && value != "manual") {
+            sendText(400, "请选择手动控制或自动控制。");
+            return;
+        }
+        saveResult(saveModeSetting(value == "manual"));
+    });
+    server.on("/control/gear", HTTP_POST, []() {
+        if (!requireFormToken()) return;
+        const PortalStatus status = readStatus();
+        if (!status.manual || !status.calibrated) {
+            sendText(409, "请选择手动控制，并在设备上完成舵机标定。");
+            return;
+        }
+        const int value = parseTenths(server.arg("value"));
+        if (value != 10 && value != 20 && value != 30) {
+            sendText(400, "请选择 1、2 或 3 档。");
+            return;
+        }
+        if (applyManualGear(value)) redirectHome();
+        else sendText(500, "档位指令输出失败。");
+    });
+    server.on("/history", HTTP_GET, sendHistory);
     server.on("/nuanshi.log", HTTP_GET, []() {
         if (!requireLogin()) return;
         File log = openEventLog();

@@ -10,6 +10,7 @@
 
 #include "bench_storage.h"
 #include "changping_weather.h"
+#include "temperature_chart.h"
 #include "web_portal.h"
 
 namespace {
@@ -29,11 +30,14 @@ constexpr uint32_t backHoldMs = 800;
 constexpr uint32_t adjustmentRepeatDelayMs = 400;
 constexpr uint32_t adjustmentRepeatIntervalMs = 100;
 constexpr int minutesPerDay = 24 * 60;
-constexpr int minCalibrationUs = 1000;
-constexpr int maxCalibrationUs = 2000;
-constexpr int calibrationStepUs = 5;
+constexpr int minCalibrationUs = 500;
+constexpr int maxCalibrationUs = 2500;
+constexpr int calibrationStepUs = 20;
 
-enum class Page { Home, About, Settings, Target, Schedule, LowGear, Wifi, Password, Calibration, Message };
+enum class Page {
+    Home, History, About, Settings, ControlMode, Target, Schedule, LowGear, Wifi, Password, Calibration, ServoTest, Message
+};
+enum class GearSource { Panel, Web, Test };
 
 struct HeatingSchedule {
     uint16_t start;
@@ -56,10 +60,10 @@ struct Calibration {
 };
 
 constexpr const char* settingsLabels[] = {
-    "目标温度", "采暖时段", "低温加热档位", "WiFi IP", "舵机标定"
+    "控制模式", "目标温度", "采暖时段", "低温加热档位", "WiFi IP", "舵机标定", "舵机测试", "关于"
 };
 constexpr Page settingsPages[] = {
-    Page::Target, Page::Schedule, Page::LowGear, Page::Wifi, Page::Password
+    Page::ControlMode, Page::Target, Page::Schedule, Page::LowGear, Page::Wifi, Page::Password, Page::ServoTest, Page::About
 };
 constexpr int settingsCount = sizeof(settingsPages) / sizeof(settingsPages[0]);
 
@@ -87,6 +91,9 @@ unsigned nextHistoryIndex = 0;
 int targetTenths = 220;
 HeatingSchedule schedule{19 * 60, 7 * 60};
 Calibration calibration{};
+int testGear = 0;
+int lastGearTenths = 0;
+bool manualControl = false;
 int lowGearTenths = 10;
 Page page = Page::Home;
 Page messageReturn = Page::Settings;
@@ -104,6 +111,14 @@ bool editingSecond = false;
 int draftValue = 0;
 HeatingSchedule draftSchedule{};
 Calibration draftCalibration{};
+
+bool settingEnabled(Page setting) {
+    return !manualControl || (setting != Page::Target && setting != Page::Schedule && setting != Page::LowGear);
+}
+
+bool chartVisible() {
+    return page == Page::History || (manualControl && page == Page::Home);
+}
 bool weatherStarted = false;
 bool wifiWasConnected = false;
 OutdoorSample outdoor{NAN, 0, -1};
@@ -136,7 +151,8 @@ void drawHeader() {
     auto& display = M5.Display;
     display.setFont(&fonts::efontCN_16);
     display.fillRect(0, 0, 320, 31, TFT_BLACK);
-    const char* title = page == Page::Home ? "暖时" : page == Page::About ? "关于" : "设置";
+    const char* title = page == Page::Home ? (manualControl ? "手动控制" : "暖时") : page == Page::History ? "温度曲线" :
+                        page == Page::About ? "关于" : "设置";
     printAt(title, 10, 8);
     char date[20] = "--/--  --:--";
     if (displayedSecond > 0) {
@@ -158,6 +174,26 @@ void drawHeader() {
 void logEvent(const char* event) {
     if (sdMounted && !appendLog(event, clockSynced.load())) {
         Serial.println("[SD] log write failed");
+    }
+}
+
+void recordHistory(int16_t value, int16_t tag) {
+    if (!sdMounted || !clockSynced.load()) {
+        return;
+    }
+    const TemperatureRecord record{
+        static_cast<uint32_t>(time(nullptr)), value, tag
+    };
+    if (appendTemperatureRecord(record)) {
+        invalidateTemperatureChart();
+    } else {
+        Serial.println("[SD] history write failed");
+    }
+}
+
+void recordTemperature(float temperature, int16_t recordedTarget) {
+    if (isfinite(temperature) && fabsf(temperature) <= 100.0f) {
+        recordHistory(lroundf(temperature * 100.0f), recordedTarget);
     }
 }
 
@@ -193,7 +229,7 @@ const char* roomState() {
 }
 
 void drawMeasurements() {
-    if (page != Page::Home) {
+    if (page != Page::Home || manualControl) {
         return;
     }
     auto& display = M5.Display;
@@ -242,7 +278,7 @@ void drawMeasurements() {
 }
 
 void drawFooter() {
-    if (page != Page::Home) {
+    if (page != Page::Home || manualControl) {
         return;
     }
     auto& display = M5.Display;
@@ -258,12 +294,22 @@ void drawFooter() {
     printAt(state, start + modeWidth + gap, y, roomLost() ? TFT_RED : roomStale() ? TFT_ORANGE : TFT_WHITE);
 }
 
-void drawButtonLabels(const char* left, const char* middle, const char* right) {
+void drawButtonLabels(const char* left, const char* middle, const char* right, int active = 0) {
     M5.Display.setFont(&fonts::efontCN_16);
     // Screen coordinates of the three key centers, measured from the panel photo.
-    printCentered(left, 72, 220);
-    printCentered(middle, 160, 220);
-    printCentered(right, 249, 220);
+    printCentered(left, 72, 220, active == 1 ? TFT_CYAN : TFT_WHITE);
+    printCentered(middle, 160, 220, active == 2 ? TFT_CYAN : TFT_WHITE);
+    printCentered(right, 249, 220, active == 3 ? TFT_CYAN : TFT_WHITE);
+}
+
+void drawHistory() {
+    if (!chartVisible()) {
+        return;
+    }
+    const uint16_t indoorColor = roomLost() ? TFT_RED : roomStale() ? TFT_ORANGE : 0x5736;
+    drawTemperatureChart(clockSynced.load() ? time(nullptr) : 0, indoorTemperature, indoorColor,
+                         hasOutdoorTemperature() ? outdoor.temperature : NAN, targetTenths, manualControl);
+    if (manualControl) drawButtonLabels("1 档", "2 档", "3 档", lastGearTenths / 10);
 }
 
 void formatTime(char* text, size_t size, unsigned minutes) {
@@ -274,10 +320,9 @@ String localIpLabel() {
     return WiFi.status() == WL_CONNECTED ? WiFi.localIP().toString() : String("未连接");
 }
 
-void drawCalibrationValue() {
+void drawServoPulseValue(unsigned pulse) {
     auto& display = M5.Display;
     display.fillRect(0, 84, 320, 73, TFT_BLACK);
-    const unsigned pulse = editingSecond ? draftCalibration.gearFourUs : draftCalibration.gearOneUs;
     char value[32];
     snprintf(value, sizeof(value), "%u us", pulse);
     display.setFont(&fonts::FreeSansBold18pt7b);
@@ -285,6 +330,10 @@ void drawCalibrationValue() {
     display.setFont(&fonts::efontCN_16);
     snprintf(value, sizeof(value), "占空比 %.3f%%", 100.0 * pulse / servoPeriodUs);
     printCentered(value, 160, 135);
+}
+
+void drawCalibrationValue() {
+    drawServoPulseValue(editingSecond ? draftCalibration.gearFourUs : draftCalibration.gearOneUs);
 }
 
 void drawDraftTemperatureOrGear(bool target) {
@@ -337,7 +386,8 @@ void drawMenu() {
             printCentered("暖时", 160, 56, TFT_CYAN);
             printCentered("本设备会根据室内外温度，", 160, 96);
             printCentered("自动调节燃气地暖的加热控制。", 160, 122);
-            printCentered("当前为观测模式", 160, 171, TFT_LIGHTGREY);
+            printCentered(manualControl ? "当前为手动控制" : "当前为观测模式", 160, 171, TFT_LIGHTGREY);
+            drawButtonLabels("", "返回", "");
             break;
         case Page::Settings: {
             char start[6], end[6], hours[20], target[16], gear[12];
@@ -347,23 +397,31 @@ void drawMenu() {
             snprintf(target, sizeof(target), "%.1f °C", targetTenths / 10.0f);
             snprintf(gear, sizeof(gear), "%.1f", lowGearTenths / 10.0f);
             const String ip = localIpLabel();
-            const char* values[] = {target, hours, gear, ip.c_str(), calibration.valid() ? "已标定" : "未标定"};
+            const char* values[] = {manualControl ? "手动控制" : "自动控制", target, hours, gear, ip.c_str(),
+                                    calibration.valid() ? "已标定" : "未标定", "1-4 档", ""};
             for (int row = 0; row < settingsCount; ++row) {
-                const int y = 35 + row * 32;
+                const int y = 33 + row * 20;
                 const bool selected = row == selectedSetting;
                 const uint16_t background = selected ? 0x1148 : TFT_BLACK;
-                const uint16_t color = selected ? TFT_CYAN : TFT_LIGHTGREY;
-                display.fillRoundRect(8, y, 304, 29, 5, background);
+                const uint16_t color = !settingEnabled(settingsPages[row]) ? TFT_DARKGREY :
+                                       selected ? TFT_CYAN : TFT_LIGHTGREY;
+                display.fillRoundRect(8, y, 304, 19, 4, background);
                 display.setTextColor(color, background);
-                display.setCursor(17, y + 6);
+                display.setCursor(17, y + 2);
                 display.print(settingsLabels[row]);
-                display.setCursor(301 - display.textWidth(values[row]), y + 6);
+                display.setCursor(301 - display.textWidth(values[row]), y + 2);
                 display.print(values[row]);
             }
             printCentered("长按 B 返回", 160, 200, TFT_LIGHTGREY);
             drawButtonLabels("上移", "进入", "下移");
             break;
         }
+        case Page::ControlMode:
+            printCentered("控制模式", 160, 56, TFT_CYAN);
+            printCentered("自动控制", 160, 100, draftValue == 0 ? TFT_CYAN : TFT_LIGHTGREY);
+            printCentered("手动控制", 160, 134, draftValue != 0 ? TFT_CYAN : TFT_LIGHTGREY);
+            drawButtonLabels("自动", "保存", "手动");
+            break;
         case Page::Target:
         case Page::LowGear: {
             const bool target = page == Page::Target;
@@ -399,13 +457,26 @@ void drawMenu() {
             printCentered(editingSecond ? "舵机标定 · 4 档" : "舵机标定 · 1 档", 160, 53, TFT_CYAN);
             drawCalibrationValue();
             printCentered("长按 A / C 连续微调", 160, 168, TFT_LIGHTGREY);
-            drawButtonLabels("-5 us", editingSecond ? "保存" : "下一档", "+5 us");
+            drawButtonLabels("-20 us", editingSecond ? "保存" : "下一档", "+20 us");
             break;
+        case Page::ServoTest: {
+            char title[32] = "舵机测试";
+            if (testGear) snprintf(title, sizeof(title), "舵机测试 · %d 档", testGear);
+            printCentered(title, 160, 53, TFT_CYAN);
+            if (testGear) {
+                drawServoPulseValue(calibration.pulseAt(testGear * 10));
+            } else {
+                printCentered("按 A 或 C 测试 1 档", 160, 104);
+            }
+            drawButtonLabels("降档", "退出", "升档");
+            break;
+        }
         case Page::Message:
             display.drawRoundRect(33, 78, 254, 70, 6, TFT_RED);
             printCentered(messageText, 160, 106, TFT_RED);
             break;
         case Page::Home:
+        case Page::History:
             break;
     }
 }
@@ -420,7 +491,9 @@ void refreshClock(bool redraw = false) {
         lastRefreshMs = millis();
         drawHeader();
     }
-    if (page != Page::Home) {
+    if (chartVisible()) {
+        if (redraw || minuteChanged) drawHistory();
+    } else if (page != Page::Home) {
         if (redraw || (periodic && (page == Page::Wifi || page == Page::Settings))) {
             drawMenu();
         }
@@ -440,7 +513,8 @@ PortalStatus readPortalStatus() {
         indoorTemperature, hasOutdoorTemperature() ? outdoor.temperature : NAN,
         roomState(), roomLost() ? "danger" : roomStale() ? "warn" : "good",
         (millis() - indoorUpdatedMs) / 60000,
-        targetTenths, schedule.start, schedule.end, lowGearTenths, sdMounted
+        targetTenths, schedule.start, schedule.end, lowGearTenths, sdMounted,
+        manualControl, calibration.valid(), lastGearTenths, clockSynced.load() ? static_cast<uint32_t>(time(nullptr)) : 0
     };
 }
 
@@ -459,6 +533,7 @@ void updateConnectivity() {
         char line[80];
         if (sample.error == 0) {
             outdoor = sample;
+            recordTemperature(sample.temperature, TemperatureRecord::outdoor);
             snprintf(line, sizeof(line), "Outdoor Changping temperature=%.1f C source_epoch=%lld",
                      sample.temperature, static_cast<long long>(sample.observedAt));
         } else {
@@ -467,6 +542,7 @@ void updateConnectivity() {
         Serial.printf("[WEATHER] %s\n", line);
         logEvent(line);
         drawMeasurements();
+        drawHistory();
     }
 }
 
@@ -489,6 +565,7 @@ bool saveTarget(int changed) {
     Serial.printf("[SET] %s\n", line);
     logEvent(line);
     drawMeasurements();
+    drawHistory();
     return saved;
 }
 
@@ -635,6 +712,7 @@ void pollMijia() {
         logEvent(line);
         drawMeasurements();
         drawFooter();
+        drawHistory();
         return;
     }
     if (mijiaAddressPending) {
@@ -649,17 +727,21 @@ void pollMijia() {
     const MijiaReading& reading = sample.reading;
     indoorTemperature = reading.temperature;
     indoorUpdatedMs = millis();
+    recordTemperature(reading.temperature, targetTenths);
     temperatureHistory[nextHistoryIndex] = reading.temperature;
     nextHistoryIndex = (nextHistoryIndex + 1) % trendSamples;
     readingsInHistory = min(readingsInHistory + 1, trendSamples);
-    char line[140];
-    snprintf(line, sizeof(line), "Mijia temperature=%.2f C humidity=%u %% battery=%u mV target=%.1f C outdoor=%.1f C mode=observe trend=%s",
+    char gear[12] = "unknown";
+    if (lastGearTenths) snprintf(gear, sizeof(gear), "%.1f", lastGearTenths / 10.0f);
+    char line[166];
+    snprintf(line, sizeof(line), "Mijia temperature=%.2f C humidity=%u %% battery=%u mV target=%.1f C outdoor=%.1f C mode=%s gear=%s trend=%s",
              reading.temperature, reading.humidity, reading.batteryMillivolts, targetTenths / 10.0f,
-             hasOutdoorTemperature() ? outdoor.temperature : NAN, roomTrend());
+             hasOutdoorTemperature() ? outdoor.temperature : NAN, manualControl ? "manual" : "observe", gear, roomTrend());
     Serial.printf("[MIJIA] %s\n", line);
     logEvent(line);
     drawMeasurements();
     drawFooter();
+    drawHistory();
 }
 
 void scanBle() {
@@ -702,9 +784,31 @@ bool outputServoPulse(uint16_t pulseUs, bool preview) {
     servoStarted = millis();
     servoActive = true;
     servoPreview = preview;
-    Serial.printf("[PWM] %sGPIO%u freq=%.2f Hz pulse=%u us duty=%lu\n", preview ? "calibration " : "",
+    Serial.printf("[PWM] %sGPIO%u freq=%.2f Hz pulse=%u us duty=%lu\n", preview ? "preview " : "",
                   servoPin, frequency, pulseUs, static_cast<unsigned long>(ledcRead(servoChannel)));
     return true;
+}
+
+bool applyGear(int gearTenths, GearSource source) {
+    if (!calibration.valid()) return false;
+    const int pulse = calibration.pulseAt(gearTenths);
+    if (!outputServoPulse(pulse, true)) return false;
+
+    lastGearTenths = gearTenths;
+    const char* name = source == GearSource::Panel ? "panel" : source == GearSource::Web ? "web" : "test";
+    char line[85];
+    snprintf(line, sizeof(line), "Gear command gear=%.1f source=%s pulse=%d us",
+             gearTenths / 10.0f, name, pulse);
+    Serial.printf("[GEAR] %s\n", line);
+    logEvent(line);
+    recordHistory(gearTenths, source == GearSource::Test ? TemperatureRecord::testGear : TemperatureRecord::gear);
+    drawHistory();
+    return true;
+}
+
+bool applyWebGear(int gearTenths) {
+    return manualControl && (gearTenths == 10 || gearTenths == 20 || gearTenths == 30) &&
+           applyGear(gearTenths, GearSource::Web);
 }
 
 void stopServoPulse() {
@@ -725,6 +829,7 @@ void startServoPulse() {
         drawScreen("PWM setup failed");
         return;
     }
+    lastGearTenths = 0;
     nextPulse = (nextPulse + 1) % (sizeof(servoPulses) / sizeof(servoPulses[0]));
     // Enable pad readback without changing the GPIO matrix output from LEDC.
     gpio_ll_input_enable(&GPIO, static_cast<gpio_num_t>(servoPin));
@@ -737,10 +842,11 @@ void startServoPulse() {
 }
 
 void openPage(Page next) {
-    if (page == Page::Calibration && next != page && servoActive && servoPreview) {
+    if ((page == Page::Calibration || page == Page::ServoTest) && next != page && servoActive && servoPreview) {
         stopServoPulse();
     }
     page = next;
+    if (chartVisible()) invalidateTemperatureChart();
     pageActivity = millis();
     refreshClock(true);
 }
@@ -751,8 +857,34 @@ void showMessage(const char* message, Page returnPage) {
     openPage(Page::Message);
 }
 
+bool saveControlMode(bool manual) {
+    if (manual == manualControl) return true;
+    if (!saveSetting("manual", manual, manual ? "Control mode=manual" : "Control mode=auto")) return false;
+
+    manualControl = manual;
+    if (page == Page::Home || page == Page::History || !settingEnabled(page)) {
+        openPage(Page::Home);
+    } else {
+        if (!settingEnabled(settingsPages[selectedSetting])) selectedSetting = 0;
+        if (page == Page::Message && !settingEnabled(messageReturn)) messageReturn = Page::Settings;
+        if (page == Page::ControlMode) draftValue = manualControl;
+        refreshClock(true);
+    }
+    return true;
+}
+
 void openSelectedSetting() {
     const Page next = settingsPages[selectedSetting];
+    if (!settingEnabled(next)) return;
+    if (next == Page::ServoTest) {
+        if (!calibration.valid()) {
+            showMessage("请先完成舵机标定", Page::Settings);
+            return;
+        }
+        testGear = 0;
+        openPage(next);
+        return;
+    }
     editingSecond = false;
     passwordIndex = 0;
     passwordMatches = true;
@@ -760,6 +892,7 @@ void openSelectedSetting() {
     draftValue = next == Page::Target ? targetTenths : lowGearTenths;
     draftSchedule = schedule;
     draftCalibration = calibration.valid() ? calibration : Calibration{1300, 1700};
+    if (next == Page::ControlMode) draftValue = manualControl;
     openPage(next);
 }
 
@@ -768,11 +901,15 @@ void handleMenuKey(char key) {
     bool saved;
     switch (page) {
         case Page::Home:
-            if (key == 'B') {
-                selectedSetting = 0;
-                openPage(Page::Settings);
-            } else {
-                openPage(Page::About);
+        case Page::History:
+            if (manualControl) {
+                if (!calibration.valid()) {
+                    showMessage("请先完成舵机标定", Page::Home);
+                } else if (!applyGear((key - 'A' + 1) * 10, GearSource::Panel)) {
+                    showMessage("PWM 输出失败", Page::Home);
+                }
+            } else if (key == 'A') {
+                openPage(page == Page::Home ? Page::History : Page::Home);
             }
             return;
         case Page::Settings: {
@@ -780,9 +917,19 @@ void handleMenuKey(char key) {
                 openSelectedSetting();
                 return;
             }
-            selectedSetting = (selectedSetting + (key == 'A' ? -1 : 1) + settingsCount) % settingsCount;
+            do {
+                selectedSetting = (selectedSetting + (key == 'A' ? -1 : 1) + settingsCount) % settingsCount;
+            } while (!settingEnabled(settingsPages[selectedSetting]));
             break;
         }
+        case Page::ControlMode:
+            if (key == 'B') {
+                if (saveControlMode(draftValue != 0)) openPage(Page::Settings);
+                else showMessage("保存失败", Page::ControlMode);
+                return;
+            }
+            draftValue = key == 'C';
+            break;
         case Page::Target:
         case Page::LowGear: {
             const bool target = page == Page::Target;
@@ -835,6 +982,7 @@ void handleMenuKey(char key) {
                     showMessage("PWM 输出失败", Page::Calibration);
                     return;
                 }
+                lastGearTenths = 0;
                 pulse = adjusted;
                 drawCalibrationValue();
                 return;
@@ -859,7 +1007,23 @@ void handleMenuKey(char key) {
                 return;
             }
             break;
+        case Page::ServoTest: {
+            if (key == 'B') {
+                openPage(Page::Settings);
+                return;
+            }
+            const int gear = testGear ? constrain(testGear + (key == 'A' ? -1 : 1), 1, 4) : 1;
+            if (gear == testGear) return;
+            if (!applyGear(gear * 10, GearSource::Test)) {
+                showMessage("PWM 输出失败", Page::ServoTest);
+                return;
+            }
+            testGear = gear;
+            break;
+        }
         case Page::About:
+            if (key == 'B') openPage(Page::Settings);
+            return;
         case Page::Message:
             return;
     }
@@ -881,22 +1045,20 @@ void updateMenu() {
     if (bReleased) {
         suppressBRelease = false;
     }
+    const bool bHeld = M5.BtnB.pressedFor(backHoldMs);
+    const bool bLongRelease = M5.BtnB.wasReleaseFor(backHoldMs);
+    const bool primaryPage = page == Page::Home || page == Page::History;
+    if (!ignoreB && (bHeld || bLongRelease)) {
+        suppressBRelease = bHeld;
+        if (primaryPage) selectedSetting = 0;
+        openPage(primaryPage ? Page::Settings : Page::Home);
+        return;
+    }
     if (page == Page::Message) {
         if (idle >= messageTimeoutMs) openPage(messageReturn);
         return;
     }
-    if (page == Page::About) {
-        if (idle >= menuTimeoutMs) openPage(Page::Home);
-        return;
-    }
-    const bool bHeld = M5.BtnB.pressedFor(backHoldMs);
-    const bool bLongRelease = M5.BtnB.wasReleaseFor(backHoldMs);
-    if (page != Page::Home && !ignoreB && (bHeld || bLongRelease)) {
-        suppressBRelease = bHeld;
-        openPage(Page::Home);
-        return;
-    }
-    if (page != Page::Home && idle >= menuTimeoutMs) {
+    if (!primaryPage && idle >= menuTimeoutMs) {
         openPage(Page::Home);
         return;
     }
@@ -971,6 +1133,7 @@ void setup() {
             schedule = loadedSchedule;
         }
         lowGearTenths = constrain(static_cast<int>(preferences.getUInt("low-gear", 10)), 5, 30);
+        manualControl = preferences.getUInt("manual", 0) == 1;
         const uint32_t storedCalibration = preferences.getUInt("calibration", 0);
         const Calibration loadedCalibration{static_cast<uint16_t>(storedCalibration >> 16),
                                             static_cast<uint16_t>(storedCalibration)};
@@ -981,6 +1144,9 @@ void setup() {
     digitalWrite(servoPin, LOW);
     sdMounted = mountStorage();
     Serial.println(sdMounted ? "[SD] mounted" : "[SD] mount failed");
+    if (sdMounted && importTemperatureHistory() < 0) {
+        Serial.println("[SD] temperature history import failed");
+    }
     logEvent("Boot");
     char targetLine[64];
     snprintf(targetLine, sizeof(targetLine), "Target loaded temperature=%.1f C source=%s", targetTenths / 10.0f,
@@ -998,7 +1164,7 @@ void setup() {
     if (loadMijiaAddress(mijiaAddress) && enableMijia()) {
         Serial.println("[MIJIA] address loaded from SD");
     }
-    startWebPortal(readPortalStatus, saveTarget, saveSchedule, saveLowGear);
+    startWebPortal(readPortalStatus, saveTarget, saveSchedule, saveLowGear, saveControlMode, applyWebGear);
 }
 
 void loop() {
@@ -1047,7 +1213,7 @@ void loop() {
         startServoPulse();
     } else if (command == '?') {
         reportBoard();
-    } else if (command == '-' || command == '+') {
+    } else if (!manualControl && (command == '-' || command == '+')) {
         saveTarget(constrain(targetTenths + (command == '-' ? -5 : 5), 100, 300));
     }
     if (!servoActive) {
