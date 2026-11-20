@@ -7,6 +7,8 @@
 #include <mbedtls/sha256.h>
 
 #include "bench_storage.h"
+#include "policy_package.h"
+#include "target_temperature.h"
 #include "temperature_chart.h"
 #include "web_history.h"
 
@@ -25,8 +27,10 @@ PortalStatus (*readStatus)();
 bool (*saveTargetSetting)(int);
 bool (*saveHeatingSchedule)(uint16_t, uint16_t);
 bool (*saveLowHeatingGear)(int);
-bool (*saveModeSetting)(bool);
+bool (*saveModeSetting)(ControlMode);
 bool (*applyManualGear)(int);
+bool (*installPolicy)(const HeatingPolicy&);
+bool (*saveSampleIntervalSetting)(int);
 
 constexpr char pageStart[] = R"HTML(<!doctype html><html lang="zh-CN"><meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1"><title>暖时</title>
@@ -37,7 +41,7 @@ section{background:#192734;border:1px solid #2c4150;border-radius:12px;padding:1
 dl{display:grid;grid-template-columns:auto 1fr;gap:8px 20px;margin:0}dd{margin:0;overflow-wrap:anywhere}
 dt,small{color:#b9c9d6}form{margin:0}form+form{border-top:1px solid #2c4150;padding-top:12px;margin-top:12px}
 label{display:inline-flex;align-items:center;gap:8px;margin:0 8px 8px 0}
-input,select,button,a.button{font:inherit;padding:8px 10px;border-radius:6px;border:1px solid #526a7b;color:inherit;background:#111d28}
+input,select,textarea,button,a.button{font:inherit;padding:8px 10px;border-radius:6px;border:1px solid #526a7b;color:inherit;background:#111d28}
 input[type=number]{width:5.5rem}button,a.button{cursor:pointer;text-decoration:none;display:inline-block}
 button:hover,a.button:hover{border-color:#7ed8e6}button.danger,.danger{color:#ff9c9a}.warn{color:#ffd18f}.good{color:#8fddd1}
 fieldset{padding:0;border:0;margin:14px 0 0;min-width:0}fieldset:disabled,button:disabled{opacity:.55;cursor:default}
@@ -45,6 +49,8 @@ fieldset{padding:0;border:0;margin:14px 0 0;min-width:0}fieldset:disabled,button
 #temperature-chart{display:block;width:100%;height:300px;background:#111d28;border-radius:6px;touch-action:pan-y}
 .chart-key{display:flex;gap:8px 14px;flex-wrap:wrap;margin:0 0 10px;font-size:.83rem}
 #chart-note{display:block;min-height:1.25rem;margin-top:8px}
+#policy-package{display:block;width:100%;min-height:12rem;margin:8px 0;font:0.85rem ui-monospace,monospace}
+#policy-file{max-width:100%}
 #log-preview{background:#111d28;border:1px solid #2c4150;border-radius:6px;padding:12px;margin:14px 0 8px;
 max-height:20rem;overflow:auto;white-space:pre-wrap;overflow-wrap:anywhere;font:0.83rem/1.55 ui-monospace,monospace}
 </style><main><h1>暖时</h1>)HTML";
@@ -163,9 +169,16 @@ String temperature(float degrees) {
 String statusHtml(const PortalStatus& data) {
     String html;
     html.reserve(720);
-    html += data.manual ? F("<dl data-mode=manual>") : F("<dl data-mode=auto>");
+    const bool automatic = data.mode == ControlMode::Automatic;
+    html += data.manual ? F("<dl data-mode=manual>") : automatic ? F("<dl data-mode=auto>") : F("<dl data-mode=observe>");
     html += F("<dt>控制模式</dt><dd>");
-    html += data.manual ? "手动控制" : "自动控制 · 观测中";
+    html += data.manual ? "手动控制" : automatic ? "自动控制" : "观测模式";
+    if (automatic) {
+        html += F(" · ");
+        html += data.autoState;
+    }
+    html += F("</dd><dt>策略版本</dt><dd>");
+    html += validHeatingPolicy(data.policy) ? String(data.policy.revision) : String("无有效策略");
     html += F("</dd><dt>最后档位指令</dt><dd>");
     html += data.gearTenths ? String(data.gearTenths / 10.0f, 1) + " 档" : String("暂无记录");
     html += F("</dd><dt>室内温度</dt><dd class=");
@@ -178,7 +191,9 @@ String statusHtml(const PortalStatus& data) {
         html += F(" · ");
         html += data.indoorAgeMinutes == 0 ? String("刚刚更新") : String(data.indoorAgeMinutes) + " 分钟前";
     }
-    html += F("</dd><dt>室外温度</dt><dd>");
+    html += F("</dd><dt>温度读取间隔</dt><dd>");
+    html += String(data.sampleIntervalMinutes);
+    html += F(" 分钟</dd><dt>室外温度</dt><dd>");
     html += temperature(data.outdoor);
     html += F("</dd><dt>目标温度</dt><dd>");
     html += temperature(data.targetTenths / 10.0f);
@@ -213,11 +228,13 @@ void dashboard() {
     html += statusHtml(data);
     html += F("</div></section><section><h2>设置</h2>");
     addForm(html, "/settings/mode");
-    html += F("<label>控制模式 <select name=value><option value=auto");
-    if (!data.manual) html += F(" selected");
-    html += F(">自动控制</option><option value=manual");
+    html += F("<label>控制模式 <select name=value><option value=observe");
+    if (data.mode == ControlMode::Observe) html += F(" selected");
+    html += F(">观测模式</option><option value=manual");
     if (data.manual) html += F(" selected");
-    html += F(">手动控制</option></select></label><button>保存</button></form>");
+    html += F(">手动控制</option><option value=auto");
+    if (data.mode == ControlMode::Automatic) html += F(" selected");
+    html += F(">自动控制</option></select></label><button>保存</button></form>");
     if (data.manual) {
         addForm(html, "/control/gear");
         html += data.calibrated ? F("<div class=actions>") : F("<fieldset disabled><div class=actions>");
@@ -228,7 +245,13 @@ void dashboard() {
     }
     html += data.manual ? F("<fieldset disabled>") : F("<fieldset>");
     addForm(html, "/settings/target");
-    html += F("<label>目标温度 <input type=number name=value min=10 max=30 step=0.5 required value=");
+    html += F("<label>目标温度 <input type=number name=value min=");
+    html += String(targetMinimumTenths / 10);
+    html += F(" max=");
+    html += String(targetMaximumTenths / 10);
+    html += F(" step=");
+    html += String(targetStepTenths / 10.0f, 1);
+    html += F(" required value=");
     html += String(data.targetTenths / 10.0f, 1);
     html += F("> °C</label><button>保存</button></form>");
     addForm(html, "/settings/schedule");
@@ -242,10 +265,27 @@ void dashboard() {
     addForm(html, "/settings/low-gear");
     html += F("<label>低温加热档位 <input type=number name=value min=0.5 max=3 step=0.1 required value=");
     html += String(data.lowGearTenths / 10.0f, 1);
-    html += F("></label><button>保存</button></form></fieldset></section>"
+    html += F("></label><button>保存</button></form></fieldset>");
+    addForm(html, "/settings/sample-interval");
+    html += F("<label>温度读取间隔 <input type=number name=value min=");
+    html += String(mijiaMinIntervalMinutes);
+    html += F(" max=");
+    html += String(mijiaMaxIntervalMinutes);
+    html += F(" step=1 required value=");
+    html += String(data.sampleIntervalMinutes);
+    html += F("> 分钟</label><button>保存</button></form></section>"
+              "<section><h2>策略更新</h2>");
+    addForm(html, "/settings/policy");
+    html += F("<label>策略文件 <input id=policy-file type=file accept=\".json,application/json\"></label>"
+              "<textarea id=policy-package name=package aria-label=\"策略内容\" required maxlength=4096 "
+              "spellcheck=false>");
+    if (validHeatingPolicy(data.policy)) html += encodePolicy(data.policy);
+    html += F("</textarea><div class=actions><button>安装策略</button>"
+              "<a class=button href=/policy.json>下载当前策略</a></div></form></section>"
               "<section><h2>温度曲线</h2><div class=chart-key>"
               "<span style=color:#79dfc4>室内温度 °C</span><span style=color:#93b6ff>室外温度 °C</span>"
-              "<span style=color:#ffc885>手动档位</span><span style=color:#c7a8f1>测试档位</span></div>"
+              "<span style=color:#ffc885>手动档位</span><span style=color:#79dfc4>自动档位</span>"
+              "<span style=color:#c7a8f1>测试档位</span></div>"
               "<canvas id=temperature-chart aria-label=\"最近 24 小时的室温、室外温度和档位指令\"></canvas>"
               "<small id=chart-note>正在读取温度曲线…</small></section>"
               "<section><h2>系统日志</h2><div class=actions><a class=button href=/nuanshi.log>下载日志</a>");
@@ -253,6 +293,10 @@ void dashboard() {
     html += F("<button class=danger onclick=\"return confirm('删除当前系统日志？此操作不可撤销。')\">删除日志</button>"
               "</form></div><pre id=log-preview tabindex=0 aria-label=\"最新系统日志\">正在读取日志…</pre>"
               "<small>预览文件末尾，完整记录可下载。</small></section><script>"
+              "const policyFile=document.getElementById('policy-file');"
+              "policyFile.addEventListener('change',async()=>{const file=policyFile.files[0];if(!file)return;"
+              "if(file.size>4096){alert('策略文件不能超过 4 KB。');policyFile.value='';return;}"
+              "try{document.getElementById('policy-package').value=await file.text()}catch{alert('无法读取策略文件。')}});"
               "const preview=document.getElementById('log-preview');"
               "async function updateLog(){if(document.hidden)return;try{"
               "const r=await fetch('/logs/preview');if(r.status===401){location.reload();return;}"
@@ -324,6 +368,7 @@ void sendHistory() {
     }
     const uint32_t start = status.epoch - temperatureHistoryWindow;
     responseHeaders();
+    server.sendHeader("X-Indoor-Gap-Seconds", String(mijiaHistoryGapSeconds(status.sampleIntervalMinutes)));
     server.setContentLength(CONTENT_LENGTH_UNKNOWN);
     server.send(200, "text/csv; charset=utf-8", "");
     char chunk[768];
@@ -332,10 +377,12 @@ void sendHistory() {
     for (int i = 0; i < count; ++i) {
         const auto& row = records[i];
         if (row.epoch < start || row.epoch > status.epoch) continue;
-        const bool gear = row.targetTenths == TemperatureRecord::gear || row.targetTenths == TemperatureRecord::testGear;
+        const bool gear = row.targetTenths == TemperatureRecord::gear || row.targetTenths == TemperatureRecord::testGear ||
+                          row.targetTenths == TemperatureRecord::automaticGear;
         const char* type = row.targetTenths == TemperatureRecord::outdoor ? "outdoor" :
                            row.targetTenths == TemperatureRecord::gear ? "gear" :
-                           row.targetTenths == TemperatureRecord::testGear ? "test" : "indoor";
+                           row.targetTenths == TemperatureRecord::testGear ? "test" :
+                           row.targetTenths == TemperatureRecord::automaticGear ? "auto" : "indoor";
         char line[48];
         const int size = snprintf(line, sizeof(line), "%lu,%s,%.*f\n", static_cast<unsigned long>(row.epoch),
                                   type, gear ? 1 : 2, row.temperatureHundredths / (gear ? 10.0 : 100.0));
@@ -404,13 +451,16 @@ void sendLogPreview() {
 
 void startWebPortal(PortalStatus (*status)(), bool (*target)(int),
                     bool (*schedule)(uint16_t, uint16_t), bool (*lowGear)(int),
-                    bool (*mode)(bool), bool (*manualGear)(int)) {
+                    bool (*mode)(ControlMode), bool (*manualGear)(int),
+                    bool (*policy)(const HeatingPolicy&), bool (*sampleInterval)(int)) {
     readStatus = status;
     saveTargetSetting = target;
     saveHeatingSchedule = schedule;
     saveLowHeatingGear = lowGear;
     saveModeSetting = mode;
     applyManualGear = manualGear;
+    installPolicy = policy;
+    saveSampleIntervalSetting = sampleInterval;
     const char* headers[] = {"Cookie"};
     server.collectHeaders(headers, 1);
     server.on("/", HTTP_GET, dashboard);
@@ -423,8 +473,8 @@ void startWebPortal(PortalStatus (*status)(), bool (*target)(int),
     server.on("/settings/target", HTTP_POST, []() {
         if (!requireAutomaticMode()) return;
         const int value = parseTenths(server.arg("value"));
-        if (value < 100 || value > 300 || value % 5 != 0) {
-            sendText(400, "目标温度范围为 10～30 °C，步长 0.5 °C。");
+        if (!validTargetTemperature(value)) {
+            sendText(400, "目标温度范围为 23～26 °C，步长 0.5 °C。");
             return;
         }
         saveResult(saveTargetSetting(value));
@@ -451,11 +501,48 @@ void startWebPortal(PortalStatus (*status)(), bool (*target)(int),
     server.on("/settings/mode", HTTP_POST, []() {
         if (!requireFormToken()) return;
         const String value = server.arg("value");
-        if (value != "auto" && value != "manual") {
-            sendText(400, "请选择手动控制或自动控制。");
+        if (value != "auto" && value != "manual" && value != "observe") {
+            sendText(400, "请选择观测模式、手动控制或自动控制。");
             return;
         }
-        saveResult(saveModeSetting(value == "manual"));
+        if (value == "auto") {
+            const auto data = readStatus();
+            if (!data.calibrated || !validHeatingPolicy(data.policy)) {
+                sendText(409, "自动控制需要舵机标定和有效策略。");
+                return;
+            }
+        }
+        saveResult(saveModeSetting(value == "manual" ? ControlMode::Manual :
+                                   value == "auto" ? ControlMode::Automatic : ControlMode::Observe));
+    });
+    server.on("/settings/sample-interval", HTTP_POST, []() {
+        if (!requireFormToken()) return;
+        const int value = parseTenths(server.arg("value"));
+        if (value % 10 != 0 || !validMijiaInterval(value / 10)) {
+            sendText(400, "温度读取间隔须为 1 到 20 分钟之间的整数。");
+            return;
+        }
+        saveResult(saveSampleIntervalSetting(value / 10));
+    });
+    server.on("/settings/policy", HTTP_POST, []() {
+        if (!requireFormToken()) return;
+        HeatingPolicy policy;
+        if (!decodePolicy(server.arg("package"), policy)) {
+            sendText(400, "策略格式或规则范围错误，当前策略仍有效。");
+            return;
+        }
+        saveResult(installPolicy(policy));
+    });
+    server.on("/policy.json", HTTP_GET, []() {
+        if (!requireLogin()) return;
+        const auto policy = readStatus().policy;
+        if (!validHeatingPolicy(policy)) {
+            sendText(503, "没有可下载的策略。");
+            return;
+        }
+        responseHeaders();
+        server.sendHeader("Content-Disposition", "attachment; filename=nuanshi-policy.json");
+        server.send(200, "application/json", encodePolicy(policy));
     });
     server.on("/control/gear", HTTP_POST, []() {
         if (!requireFormToken()) return;

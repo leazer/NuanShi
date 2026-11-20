@@ -13,6 +13,7 @@ struct TemperatureRecord {
     static constexpr int16_t outdoor = INT16_MIN;
     static constexpr int16_t gear = INT16_MIN + 1;
     static constexpr int16_t testGear = INT16_MIN + 2;
+    static constexpr int16_t automaticGear = INT16_MIN + 3;
     uint32_t epoch;
     int16_t temperatureHundredths;  // Gear in tenths for gear records.
     int16_t targetTenths;  // A negative tag identifies other record types.

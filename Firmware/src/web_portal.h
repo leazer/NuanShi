@@ -1,6 +1,7 @@
 #pragma once
 
 #include <stdint.h>
+#include "heating_policy.h"
 
 struct PortalStatus {
     float indoor;
@@ -17,9 +18,14 @@ struct PortalStatus {
     bool calibrated;
     int gearTenths;
     uint32_t epoch;
+    ControlMode mode;
+    const char* autoState;
+    HeatingPolicy policy;
+    int sampleIntervalMinutes;
 };
 
 void startWebPortal(PortalStatus (*readStatus)(), bool (*saveTarget)(int),
                     bool (*saveSchedule)(uint16_t, uint16_t), bool (*saveLowGear)(int),
-                    bool (*saveMode)(bool), bool (*applyGear)(int));
+                    bool (*saveMode)(ControlMode), bool (*applyGear)(int),
+                    bool (*savePolicy)(const HeatingPolicy&), bool (*saveSampleInterval)(int));
 void pollWebPortal();

@@ -2,12 +2,14 @@
 
 #include <Arduino.h>
 #include <NimBLEDevice.h>
+#include <atomic>
 #include <freertos/queue.h>
 
 namespace {
 constexpr char serviceId[] = "ebe0ccb0-7a0a-4b0c-8a1a-6ff2997da3a6";
 constexpr char measurementId[] = "ebe0ccc1-7a0a-4b0c-8a1a-6ff2997da3a6";
 constexpr unsigned retryDelayMs = 10000;
+std::atomic<int> sampleIntervalMinutes{mijiaDefaultIntervalMinutes};
 
 uint8_t sensorAddress[mijiaAddressSize] = {};
 QueueHandle_t readings = nullptr;
@@ -34,6 +36,15 @@ void receiveSample(NimBLERemoteCharacteristic*, uint8_t* data, size_t size, bool
     }
 }
 
+void waitForNextSample(TickType_t attemptStarted) {
+    for (;;) {
+        const TickType_t interval = pdMS_TO_TICKS(mijiaIntervalMs(mijiaIntervalMinutes()));
+        const TickType_t elapsed = xTaskGetTickCount() - attemptStarted;
+        if (elapsed >= interval) return;
+        vTaskDelay(min(interval - elapsed, pdMS_TO_TICKS(1000)));
+    }
+}
+
 void readSensor(void*) {
     NimBLEClient* client = NimBLEDevice::createClient();
     if (!client) {
@@ -48,7 +59,7 @@ void readSensor(void*) {
     const NimBLEAddress target(mac, BLE_ADDR_PUBLIC);
     unsigned failedAttempts = 0;
     for (;;) {
-        TickType_t attemptStarted = xTaskGetTickCount();
+        const TickType_t attemptStarted = xTaskGetTickCount();
         ulTaskNotifyTake(pdTRUE, 0);
         MijiaSample sample{};
         bool received = false;
@@ -81,11 +92,19 @@ void readSensor(void*) {
             vTaskDelay(pdMS_TO_TICKS(retryDelayMs));
         } else {
             failedAttempts = 0;
-            vTaskDelayUntil(&attemptStarted, pdMS_TO_TICKS(mijiaSampleIntervalMs));
+            waitForNextSample(attemptStarted);
         }
     }
 }
 }  // namespace
+
+int mijiaIntervalMinutes() {
+    return sampleIntervalMinutes.load();
+}
+
+void setMijiaIntervalMinutes(int minutes) {
+    if (validMijiaInterval(minutes)) sampleIntervalMinutes.store(minutes);
+}
 
 bool startMijiaReader(const uint8_t (&address)[mijiaAddressSize]) {
     if (readerTask) {

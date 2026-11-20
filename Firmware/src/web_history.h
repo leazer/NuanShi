@@ -26,7 +26,7 @@ function drawChart() {
     context.font = '12px system-ui';
     chartMarkers = [];
     if (!historyData) return;
-    const {start, end, rows} = historyData;
+    const {start, end, rows, indoorGap} = historyData;
     const left = 39;
     const right = width - 36;
     const roomTop = 38;
@@ -94,13 +94,13 @@ function drawChart() {
             }
         }
     }
-    drawSeries('indoor', roomTop, roomBottom, '#79dfc4', 360);
+    drawSeries('indoor', roomTop, roomBottom, '#79dfc4', indoorGap);
     drawSeries('outdoor', outdoorTop, outdoorBottom, '#93b6ff', 3600);
     const labelEnds = [-Infinity, -Infinity];
     for (const [time, kind, value] of rows) {
-        if (kind !== 'gear' && kind !== 'test') continue;
+        if (kind !== 'gear' && kind !== 'test' && kind !== 'auto') continue;
         const x = xAt(time);
-        const color = kind === 'test' ? '#c7a8f1' : '#ffc885';
+        const color = kind === 'test' ? '#c7a8f1' : kind === 'auto' ? '#79dfc4' : '#ffc885';
         const label = value.toFixed(1) + ' 档';
         chartMarkers.push({x, time, kind, label});
         context.strokeStyle = color;
@@ -126,7 +126,7 @@ function showMarker(event) {
     const near = chartMarkers.filter(marker => Math.abs(marker.x - x) < 12);
     hoveredMarker = near[0] || null;
     chartNote.textContent = hoveredMarker ? near.map(marker => timeLabel(marker.time) + ' ' +
-        (marker.kind === 'test' ? '测试 ' : '手动 ') + marker.label).join(' · ') : chartDefaultNote;
+        (marker.kind === 'test' ? '测试 ' : marker.kind === 'auto' ? '自动 ' : '手动 ') + marker.label).join(' · ') : chartDefaultNote;
 }
 chart.addEventListener('pointermove', showMarker);
 chart.addEventListener('pointerdown', showMarker);
@@ -151,7 +151,8 @@ async function updateChart() {
             const [time, type, value] = line.split(',');
             return [Number(time), type, Number(value)];
         }).sort((a, b) => a[0] - b[0]);
-        historyData = {start, end, rows};
+        const indoorGap = Number(response.headers.get('X-Indoor-Gap-Seconds')) || 360;
+        historyData = {start, end, rows, indoorGap};
         if (!hoveredMarker) chartNote.textContent = rows.length ? chartDefaultNote : '最近 24 小时暂无记录';
         drawChart();
     } catch {
