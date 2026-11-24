@@ -2,12 +2,22 @@
 
 基于 M5Stack Basic（经典 ESP32，4 MiB 闪存）的地暖温控项目。设备通过 BLE 读取米家温度计，在屏幕和局域网网页上显示温度趋势，并根据采暖时段、室温和策略调整舵机档位。
 
+<p align="center">
+  <img src="docs/images/nuanshi-hero.jpg" alt="暖时效果图，屏幕显示室内外温度曲线、目标温度和采暖档位" width="760">
+  <br><sub>根据当前屏幕界面制作的效果图</sub>
+</p>
+
 ## 功能
 
 - 支持米家 `LYWSD03MMC`，采样间隔可设为 1–20 分钟。主温度计多次读取失败时可依次尝试两只备用温度计。
 - 以室内温度和趋势为依据调档，提供观测、手动和自动模式。自动模式启用前须完成舵机标定。
 - 显示室内外温度曲线、目标温度和档位，在 microSD 卡上保存系统日志和温度历史。室外数据来自 Open-Meteo，默认地点为北京昌平。
 - 在局域网网页修改设置、下载日志、更换 [JSON 控制策略](Firmware/strategies/README.md)，或上传完整固件。
+
+<p align="center">
+  <img src="docs/images/nuanshi-dashboard.jpg" alt="暖时屏幕近照，自动模式下显示近 24 小时室内外温度曲线和当前档位" width="640">
+  <br><sub>屏幕近照，经 AI 修整</sub>
+</p>
 
 ## 硬件
 
@@ -17,6 +27,11 @@
 | 室温传感器 | 小米米家 `LYWSD03MMC`，M5Stack 按已配置的 BLE 地址读取 |
 | 存储 | FAT32 microSD 卡，保存 Wi‑Fi 和米家温度计配置、日志及温度历史 |
 | 舵机信号 | GPIO17（M-Bus 第 16 脚），PWM 50 Hz |
+
+<p align="center">
+  <img src="docs/images/nuanshi-installation.jpg" alt="暖时实物安装全景，左侧为 M5Stack Basic，右侧为供暖设备面板" width="760">
+  <br><sub>实物安装全景，经 AI 修整</sub>
+</p>
 
 ## 编译与配置
 
