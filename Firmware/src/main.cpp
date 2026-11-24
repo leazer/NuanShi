@@ -92,6 +92,7 @@ uint32_t indoorUpdatedMs = 0;
 uint32_t shortenedIntervalAt = 0;
 bool awaitingReadAfterShortening = false;
 unsigned sensorFailures = 0;
+int lastMijiaSource = -1;
 HeatingSensorRecovery heatingSensor;
 float temperatureHistory[trendSamples] = {};
 unsigned readingsInHistory = 0;
@@ -862,18 +863,20 @@ void pollMijia() {
     if (!nextMijiaSample(sample)) {
         return;
     }
+    constexpr const char* sourceNames[] = {"primary", "near", "far"};
+    const char* source = sourceNames[sample.source];
     if (sample.failedAttempts) {
-        sensorFailures = max(sensorFailures, sample.failedAttempts);
+        sensorFailures = max(sensorFailures, sample.exhausted ? mijiaMaxAttempts : 1U);
         if (controlMode == ControlMode::Automatic && roomLost()) heatingSensor.markOffline(millis());
-        char line[76];
-        snprintf(line, sizeof(line), "Mijia attempt=%u/%u failed code=%d state=%s", sample.failedAttempts,
-                 mijiaMaxAttempts, sample.error, roomLost() ? "offline" : "retrying");
+        char line[96];
+        snprintf(line, sizeof(line), "Mijia attempt=%u failed code=%d state=%s sensor=%s", sample.failedAttempts,
+                 sample.error, roomLost() ? "offline" : "retrying", source);
         Serial.printf("[MIJIA] %s\n", line);
         logEvent(line);
         drawDashboard();
         return;
     }
-    if (mijiaAddressPending) {
+    if (mijiaAddressPending && sample.source == 0) {
         mijiaAddressPending = false;
         Serial.println(saveMijiaAddress(mijiaAddress) ? "[MIJIA] address saved to SD" : "[MIJIA] address active in RAM only");
     }
@@ -890,11 +893,21 @@ void pollMijia() {
     awaitingReadAfterShortening = false;
     const MijiaReading& reading = sample.reading;
     const uint32_t now = millis();
-    if (isfinite(indoorTemperature) && now - indoorUpdatedMs <= mijiaIntervalMs(mijiaIntervalMinutes()) + indoorLostGraceMs &&
+    const bool switched = lastMijiaSource >= 0 && lastMijiaSource != sample.source;
+    if (switched) {
+        char event[64];
+        snprintf(event, sizeof(event), "Mijia source changed from=%s to=%s", sourceNames[lastMijiaSource], source);
+        logEvent(event);
+        readingsInHistory = nextHistoryIndex = 0;
+        heatingSampleCount = heatingSampleNext = 0;
+        lastTemperatureJump = 0;
+    } else if (isfinite(indoorTemperature) &&
+        now - indoorUpdatedMs <= mijiaIntervalMs(mijiaIntervalMinutes()) + indoorLostGraceMs &&
         fabsf(reading.temperature - indoorTemperature) >= 0.6f) {
         heatingSampleCount = heatingSampleNext = 0;
         lastTemperatureJump = now;
     }
+    lastMijiaSource = sample.source;
     indoorTemperature = reading.temperature;
     indoorUpdatedMs = now;
     if (lastTemperatureJump && now - lastTemperatureJump >= sensorSettlingMs) lastTemperatureJump = 0;
@@ -910,9 +923,9 @@ void pollMijia() {
     char gear[12] = "unknown";
     if (lastGearTenths) snprintf(gear, sizeof(gear), "%.1f", lastGearTenths / 10.0f);
     char line[166];
-    snprintf(line, sizeof(line), "Mijia temperature=%.2f C humidity=%u %% battery=%u mV target=%.1f C outdoor=%.1f C mode=%s gear=%s trend=%s",
+    snprintf(line, sizeof(line), "Mijia temperature=%.2f C humidity=%u %% battery=%u mV target=%.1f C outdoor=%.1f C mode=%s gear=%s sensor=%s trend=%s",
              reading.temperature, reading.humidity, reading.batteryMillivolts, targetTenths / 10.0f,
-             hasOutdoorTemperature() ? outdoor.temperature : NAN, controlModeName(controlMode), gear, roomTrend());
+             hasOutdoorTemperature() ? outdoor.temperature : NAN, controlModeName(controlMode), gear, source, roomTrend());
     Serial.printf("[MIJIA] %s\n", line);
     logEvent(line);
     drawDashboard();

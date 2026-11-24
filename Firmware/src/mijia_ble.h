@@ -34,6 +34,8 @@ struct MijiaSample {
     MijiaReading reading;
     unsigned failedAttempts;
     int error;
+    uint8_t source; // 0 = primary, 1 = near backup, 2 = far backup.
+    bool exhausted;
 };
 
 bool startMijiaReader(const uint8_t (&address)[mijiaAddressSize]);
