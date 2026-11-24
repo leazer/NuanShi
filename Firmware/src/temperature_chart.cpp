@@ -1,3 +1,4 @@
+#include "lcd_small_font.h"
 #include "temperature_chart.h"
 
 #include <M5Unified.h>
@@ -42,7 +43,7 @@ void drawPanel(bool outdoor, uint32_t start, uint32_t end, int targetTenths) {
     const uint16_t lineColor = outdoor ? weatherColor : temperatureChartIndoorColor;
     const uint32_t maxGap = outdoor ? 60 * 60 : mijiaHistoryGapSeconds(mijiaIntervalMinutes());
     display.fillRoundRect(6, header - 3, 227, bottom - header + 8, 4, panelColor);
-    display.setFont(&fonts::efontCN_12);
+    display.setFont(&lcdSmallFont);
     label(outdoor ? "室外温度 昌平" : "室内温度", 13, header,
           outdoor ? TFT_WHITE : temperatureChartIndoorColor);
 

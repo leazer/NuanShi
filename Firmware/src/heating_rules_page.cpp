@@ -1,3 +1,4 @@
+#include "lcd_small_font.h"
 #include "heating_rules_page.h"
 
 #include <M5Unified.h>
@@ -33,7 +34,7 @@ void drawRule(const HeatingRule& rule, unsigned index, int y, int lowGear) {
 
     constexpr const char* names[] = {"预计欠温", "实测欠温", "室温趋势", "室外温度", "当前档位"};
     constexpr const char* units[] = {"°C", "°C", "°C/h", "°C", "档"};
-    display.setFont(&fonts::efontCN_12);
+    display.setFont(&lcdSmallFont);
     for (unsigned i = 0; i < rule.count; ++i) {
         const auto& condition = rule.conditions[i];
         const auto metric = static_cast<unsigned>(condition.metric);
@@ -48,7 +49,7 @@ void drawLimits(const HeatingPolicy& policy, unsigned start, unsigned end, int l
     display.fillRoundRect(12, 53, 296, 153, 6, cardColor);
     display.setFont(&fonts::efontCN_16);
     text("时段与保护", 23, 60, TFT_CYAN);
-    display.setFont(&fonts::efontCN_12);
+    display.setFont(&lcdSmallFont);
     char line[96];
     if (start == end) {
         snprintf(line, sizeof(line), "全天低温档 %.1f", lowGear / 10.0f);
@@ -68,7 +69,7 @@ void drawLimits(const HeatingPolicy& policy, unsigned start, unsigned end, int l
 
 void drawHeatingRulesPage(const HeatingPolicy& policy, unsigned selectedPage, unsigned start, unsigned end, int lowGear) {
     auto& display = M5.Display;
-    display.setFont(&fonts::efontCN_12);
+    display.setFont(&lcdSmallFont);
     if (!validHeatingPolicy(policy)) {
         text("暂无有效策略", 118, 102, mutedColor);
         return;

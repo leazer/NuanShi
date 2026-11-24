@@ -1,3 +1,4 @@
+#include "lcd_small_font.h"
 #include <Arduino.h>
 #include <NimBLEDevice.h>
 #include <M5Unified.h>
@@ -281,7 +282,7 @@ void drawTemperatureSummary() {
     for (int i = 0; i < 3; ++i) {
         const int y = 39 + i * 54;
         const int numberY = y + 21;
-        display.setFont(&fonts::efontCN_12);
+        display.setFont(&lcdSmallFont);
         printAt(labels[i], x, y, i == 1 ? indoorColor : TFT_LIGHTGREY);
         const int unitWidth = display.textWidth("°C");
         const int unitHeight = display.fontHeight();
@@ -292,7 +293,7 @@ void drawTemperatureSummary() {
         const int numberWidth = display.textWidth(value);
         const int bottom = numberY + display.fontHeight();
         printAt(value, x, numberY, colors[i]);
-        display.setFont(&fonts::efontCN_12);
+        display.setFont(&lcdSmallFont);
         printAt("°C", x + numberWidth + 3, bottom - unitHeight, colors[i]);
     }
 }
@@ -306,7 +307,7 @@ void drawFooter() {
     display.drawFastHLine(8, 216, 304, 0x21A9);
     display.setFont(&fonts::efontCN_16);
     if (manualControl) {
-        display.setFont(&fonts::efontCN_12);
+        display.setFont(&lcdSmallFont);
         printAt("手动控制档位", 12, 223, TFT_LIGHTGREY);
         display.setFont(&fonts::efontCN_16);
         printCentered("-", 103, 220);
@@ -450,7 +451,7 @@ void drawH2sChannel(int top, const char* label, uint16_t color, int32_t jed106::
 
     char value[16];
     if (high >= 0) {
-        display.setFont(&fonts::efontCN_12);
+        display.setFont(&lcdSmallFont);
         snprintf(value, sizeof(value), "%ld", static_cast<long>(high));
         printAt(value, 7, high == low ? top + height / 2 - 6 : top, TFT_LIGHTGREY);
         if (high != low) {
@@ -492,12 +493,12 @@ void drawH2s() {
     auto& display = M5.Display;
     display.startWrite();
     display.fillRect(0, 33, 320, 181, TFT_BLACK);
-    display.setFont(&fonts::efontCN_12);
+    display.setFont(&lcdSmallFont);
     printCentered("0x2A   50 kHz   1 Hz", 125, 37, TFT_LIGHTGREY);
     printCentered("原始值", 266, 37, TFT_LIGHTGREY);
     drawH2sChannel(57, "0xA1", TFT_CYAN, &jed106::Readings::a1);
     drawH2sChannel(132, "0xE1", TFT_YELLOW, &jed106::Readings::e1);
-    display.setFont(&fonts::efontCN_12);
+    display.setFont(&lcdSmallFont);
     printAt("-59 s", 43, 198, TFT_LIGHTGREY);
     printAt("现在", 183, 198, TFT_LIGHTGREY);
     display.endWrite();

@@ -4,6 +4,7 @@
 #include <WebServer.h>
 #include <WiFi.h>
 #include <esp_system.h>
+#include <esp_ota_ops.h>
 #include <mbedtls/sha256.h>
 
 #include "bench_storage.h"
@@ -31,6 +32,18 @@ bool (*saveModeSetting)(ControlMode);
 bool (*applyManualGear)(int);
 bool (*installPolicy)(const HeatingPolicy&);
 bool (*saveSampleIntervalSetting)(int);
+const esp_partition_t* firmwarePartition = nullptr;
+esp_ota_handle_t firmwareHandle = 0;
+size_t firmwareBytes = 0;
+size_t firmwareExpected = 0;
+bool firmwareComplete = false;
+int firmwareError = 400;
+
+void abortFirmwareUpload() {
+    if (firmwareHandle) esp_ota_abort(firmwareHandle);
+    firmwareHandle = 0;
+    firmwarePartition = nullptr;
+}
 
 constexpr char pageStart[] = R"HTML(<!doctype html><html lang="zh-CN"><meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1"><title>暖时</title>
@@ -116,6 +129,131 @@ bool requireFormToken() {
     if (formToken.length() == 32 && formToken.equalsConstantTime(supplied)) return true;
     sendText(403, "请求校验失败，请刷新首页后重试。");
     return false;
+}
+
+bool authorizeFirmwareUpload() {
+    const String supplied = server.header("X-Firmware-Token");
+    return loggedIn() && formToken.length() == 32 && formToken.equalsConstantTime(supplied);
+}
+
+void receiveFirmwareUpload() {
+    auto& upload = server.upload();
+    switch (upload.status) {
+        case UPLOAD_FILE_START: {
+            if (firmwareHandle || firmwareComplete) {
+                abortFirmwareUpload();
+                firmwareComplete = false;
+                firmwareError = 400;
+                return;
+            }
+            firmwareBytes = firmwareExpected = 0;
+            firmwareError = 400;
+            if (!authorizeFirmwareUpload() || upload.name != "firmware") return;
+            firmwarePartition = esp_ota_get_next_update_partition(nullptr);
+            const String size = server.header("X-Firmware-Size");
+            if (!firmwarePartition || !size.length() || size.length() > 7) return;
+            for (unsigned i = 0; i < size.length(); ++i) {
+                if (!isDigit(size[i])) return;
+            }
+            firmwareExpected = size.toInt();
+            if (!firmwareExpected || firmwareExpected > firmwarePartition->size) return;
+            firmwareError = 500;
+            if (esp_ota_begin(firmwarePartition, firmwareExpected, &firmwareHandle) != ESP_OK) {
+                abortFirmwareUpload();
+            }
+            break;
+        }
+        case UPLOAD_FILE_WRITE:
+            if (!firmwareHandle) return;
+            if (upload.currentSize > firmwareExpected - firmwareBytes) {
+                firmwareError = 400;
+                abortFirmwareUpload();
+            } else if (esp_ota_write(firmwareHandle, upload.buf, upload.currentSize) != ESP_OK) {
+                abortFirmwareUpload();
+            } else {
+                firmwareBytes += upload.currentSize;
+            }
+            break;
+        case UPLOAD_FILE_END:
+            if (!firmwareHandle) return;
+            if (firmwareBytes != firmwareExpected || upload.totalSize != firmwareExpected) {
+                firmwareError = 400;
+                abortFirmwareUpload();
+            } else {
+                const esp_err_t result = esp_ota_end(firmwareHandle);
+                firmwareHandle = 0;
+                firmwareComplete = result == ESP_OK;
+                firmwareError = 422;
+            }
+            break;
+        case UPLOAD_FILE_ABORTED:
+            abortFirmwareUpload();
+            firmwareComplete = false;
+            break;
+    }
+}
+
+void finishFirmwareUpload() {
+    const bool complete = firmwareComplete;
+    firmwareComplete = false;
+    if (!requireLogin()) {
+        abortFirmwareUpload();
+        return;
+    }
+    if (!authorizeFirmwareUpload()) {
+        abortFirmwareUpload();
+        sendText(403, "请求校验失败，请刷新升级页。");
+        return;
+    }
+    if (!complete || !firmwarePartition) {
+        abortFirmwareUpload();
+        sendText(firmwareError, "固件上传失败，设备继续运行当前版本。");
+        return;
+    }
+    if (esp_ota_set_boot_partition(firmwarePartition) != ESP_OK) {
+        abortFirmwareUpload();
+        sendText(500, "固件启动校验失败，设备继续运行当前版本。");
+        return;
+    }
+    abortFirmwareUpload();
+    appendLog("Firmware OTA verified; restarting", readStatus().epoch != 0);
+    sendText(200, "固件校验通过，设备正在重启。约 20 秒后可返回首页。");
+    delay(350);
+    ESP.restart();
+}
+
+void showFirmwareUpdater() {
+    if (!requireLogin()) return;
+    const auto* current = esp_ota_get_running_partition();
+    const auto* next = esp_ota_get_next_update_partition(nullptr);
+    String html(pageStart);
+    html += F("<section><h2>固件更新</h2><p>运行分区 ");
+    html += current ? current->label : "未知";
+    html += F("</p>");
+    if (next) {
+        html += F("<form id=firmware-form data-token=\"");
+        html += formToken;
+        html += F("\" data-limit=");
+        html += String(next->size);
+        html += F("><label>固件文件 <input id=firmware-file type=file accept=.bin required></label>"
+                  "<button>上传并重启</button><p id=firmware-state role=status></p></form><script>"
+                  "const form=document.querySelector('#firmware-form'), state=document.querySelector('#firmware-state');"
+                  "form.addEventListener('submit',async e=>{e.preventDefault();"
+                  "const file=document.querySelector('#firmware-file').files[0];"
+                  "if(!file||!file.size||file.size>Number(form.dataset.limit)){state.textContent='文件为空或超出分区容量。';return;}"
+                  "if(!confirm('安装该固件并重启设备？'))return;"
+                  "const button=form.querySelector('button');button.disabled=true;state.textContent='正在上传，请保持设备供电。';"
+                  "const data=new FormData();data.append('firmware',file);"
+                  "try{const r=await fetch('/firmware',{method:'POST',headers:{'X-Firmware-Token':form.dataset.token,"
+                  "'X-Firmware-Size':String(file.size)},body:data});state.textContent=await r.text();"
+                  "if(!r.ok)button.disabled=false;}catch{state.textContent='连接中断。请稍后打开首页确认设备状态。';"
+                  "button.disabled=false;}});</script>");
+    } else {
+        html += F("<p>未配置备用应用分区。</p>");
+    }
+    html += F("<a class=button href=/>返回首页</a></section></main></html>");
+    responseHeaders();
+    server.send(200, "text/html; charset=utf-8", html);
 }
 
 bool passwordCorrect(const String& password) {
@@ -282,6 +420,7 @@ void dashboard() {
     if (validHeatingPolicy(data.policy)) html += encodePolicy(data.policy);
     html += F("</textarea><div class=actions><button>安装策略</button>"
               "<a class=button href=/policy.json>下载当前策略</a></div></form></section>"
+              "<section><h2>固件</h2><a class=button href=/firmware>更新固件</a></section>"
               "<section><h2>温度曲线</h2><div class=chart-key>"
               "<span style=color:#79dfc4>室内温度 °C</span><span style=color:#93b6ff>室外温度 °C</span>"
               "<span style=color:#ffc885>手动档位</span><span style=color:#79dfc4>自动档位</span>"
@@ -461,10 +600,12 @@ void startWebPortal(PortalStatus (*status)(), bool (*target)(int),
     applyManualGear = manualGear;
     installPolicy = policy;
     saveSampleIntervalSetting = sampleInterval;
-    const char* headers[] = {"Cookie"};
-    server.collectHeaders(headers, 1);
+    const char* headers[] = {"Cookie", "X-Firmware-Token", "X-Firmware-Size"};
+    server.collectHeaders(headers, sizeof(headers) / sizeof(headers[0]));
     server.on("/", HTTP_GET, dashboard);
     server.on("/login", HTTP_POST, login);
+    server.on("/firmware", HTTP_GET, showFirmwareUpdater);
+    server.on("/firmware", HTTP_POST, finishFirmwareUpload, receiveFirmwareUpload);
     server.on("/status", HTTP_GET, []() {
         if (!requireLogin()) return;
         responseHeaders();
@@ -591,4 +732,8 @@ void pollWebPortal() {
         formToken = "";
     }
     server.handleClient();
+    // The multipart parser and route handler run in the same handleClient call.
+    // Release an incomplete upload if parsing failed before reaching the route.
+    if (firmwarePartition || firmwareHandle) abortFirmwareUpload();
+    firmwareComplete = false;
 }
