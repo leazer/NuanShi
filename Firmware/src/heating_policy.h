@@ -6,6 +6,27 @@
 enum class ControlMode : uint8_t { Observe, Manual, Automatic };
 enum class HeatingMetric : uint8_t { ForecastDeficit, IndoorDeficit, Trend, Outdoor, Gear };
 
+struct HeatingSensorRecovery {
+    bool offline = false;
+    bool reevaluate = false;
+    uint32_t offlineSince = 0;
+
+    void markOffline(uint32_t now) {
+        if (!offline) offlineSince = now;
+        offline = true;
+        reevaluate = false;
+    }
+
+    void markRecovered() {
+        if (offline) reevaluate = true;
+        offline = false;
+    }
+
+    bool useFallback(uint32_t now, uint32_t grace, int currentGear) const {
+        return offline && (!currentGear || now - offlineSince >= grace);
+    }
+};
+
 constexpr int keepGear = 0;
 constexpr int useLowGear = -1;
 constexpr unsigned maxHeatingRules = 8;

@@ -92,6 +92,7 @@ uint32_t indoorUpdatedMs = 0;
 uint32_t shortenedIntervalAt = 0;
 bool awaitingReadAfterShortening = false;
 unsigned sensorFailures = 0;
+HeatingSensorRecovery heatingSensor;
 float temperatureHistory[trendSamples] = {};
 unsigned readingsInHistory = 0;
 unsigned nextHistoryIndex = 0;
@@ -863,6 +864,7 @@ void pollMijia() {
     }
     if (sample.failedAttempts) {
         sensorFailures = max(sensorFailures, sample.failedAttempts);
+        if (controlMode == ControlMode::Automatic && roomLost()) heatingSensor.markOffline(millis());
         char line[76];
         snprintf(line, sizeof(line), "Mijia attempt=%u/%u failed code=%d state=%s", sample.failedAttempts,
                  mijiaMaxAttempts, sample.error, roomLost() ? "offline" : "retrying");
@@ -878,6 +880,11 @@ void pollMijia() {
     if (sensorFailures) {
         logEvent("Mijia recovered");
         readingsInHistory = nextHistoryIndex = 0;
+    }
+    if (controlMode == ControlMode::Automatic && (heatingSensor.offline || roomLost())) {
+        heatingSensor.markOffline(millis());
+        heatingSensor.markRecovered();
+        heatingSampleCount = heatingSampleNext = 0;
     }
     sensorFailures = 0;
     awaitingReadAfterShortening = false;
@@ -1014,7 +1021,7 @@ void updateAutomaticHeating() {
         (page != Page::Home && page != Page::Rules)) return;
     const uint32_t now = millis();
     static uint32_t lastEvaluation = 0;
-    if (lastEvaluation && now - lastEvaluation < 15000) return;
+    if ((!heatingSensor.reevaluate || lastTemperatureJump) && lastEvaluation && now - lastEvaluation < 15000) return;
     lastEvaluation = now;
     if (!calibration.valid() || !validHeatingPolicy(heatingPolicy)) {
         setAutomaticState("等待标定或策略");
@@ -1030,17 +1037,25 @@ void updateAutomaticHeating() {
     const bool active = heatingHours(local.tm_hour * 60 + local.tm_min, schedule.start, schedule.end);
     const bool jump = lastTemperatureJump != 0;
     const bool lost = roomLost();
+    if (lost) heatingSensor.markOffline(now);
+    const bool fallback = heatingSensor.useFallback(
+        now, mijiaIntervalMs(mijiaIntervalMinutes()) + indoorLostGraceMs, lastGearTenths);
     const bool fresh = !roomStale() && !jump && isfinite(indoorTemperature);
-    const unsigned held = hasServoMotion ? (now - lastServoMotion) / 60000 : UINT16_MAX;
-    const auto decision = decideHeating(heatingPolicy, active, fresh, lost, indoorTemperature,
+    const bool recoverNow = active && fresh && heatingSensor.reevaluate;
+    const unsigned held = hasServoMotion && !recoverNow ? (now - lastServoMotion) / 60000 : UINT16_MAX;
+    const auto decision = decideHeating(heatingPolicy, active, fresh, fallback, indoorTemperature,
                                         hourlyHeatingTrend(), hasOutdoorTemperature() ? outdoor.temperature : NAN,
                                         targetTenths, lowGearTenths, lastGearTenths, held);
     if (decision.gear && decision.gear != lastGearTenths &&
         !applyGear(decision.gear, GearSource::Automatic, decision.reason, decision.rule)) {
         setAutomaticState("档位输出失败");
+        heatingSensor.reevaluate = false;
         return;
     }
-    setAutomaticState(!active ? "低温时段" : lost ? "失联低档" : !fresh ? "等待稳定读数" : "采暖中");
+    if (recoverNow) logEvent("Mijia recovered: heating strategy re-evaluated without hold");
+    if (recoverNow || !active) heatingSensor.reevaluate = false;
+    setAutomaticState(!active ? "低温时段" : fallback ? "失联低档" : lost ? "失联暂保持" :
+                      !fresh ? "等待稳定读数" : "采暖中");
 }
 
 void stopServoPulse() {
@@ -1135,6 +1150,7 @@ bool saveControlMode(ControlMode mode) {
 
     if (servoActive) stopServoPulse();
     controlMode = mode;
+    heatingSensor = {};
     manualControl = mode == ControlMode::Manual;
     automaticState = mode == ControlMode::Automatic ? "等待检查" : "未启用";
     if (page == Page::Home || page == Page::Rules || !settingEnabled(page)) {

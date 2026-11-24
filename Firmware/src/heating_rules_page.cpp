@@ -59,10 +59,10 @@ void drawLimits(const HeatingPolicy& policy, unsigned start, unsigned end, int l
     text(line, 23, 86);
     snprintf(line, sizeof(line), "常规间隔 %u 分钟   预测 %u 分钟", policy.holdMinutes, policy.forecastMinutes);
     text(line, 23, 105);
-    text("室温高于目标 0.5 °C 或确认失联：回低温档", 23, 124);
-    text("非采暖时段：回低温档", 23, 143);
-    text("读数突变：等待稳定后再判断", 23, 162);
-    text("没有匹配规则：维持上次档位", 23, 181);
+    text("短时失联保持，持续失联回低温档", 23, 124);
+    text("恢复稳定读数后立即重新判断", 23, 143);
+    text("非采暖时段或超温 0.5 °C：回低温档", 23, 162);
+    text("读数突变：等待稳定后再判断", 23, 181);
 }
 }  // namespace
 
