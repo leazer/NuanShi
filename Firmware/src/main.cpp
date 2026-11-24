@@ -11,6 +11,7 @@
 #include "bench_storage.h"
 #include "changping_weather.h"
 #include "heating_rules_page.h"
+#include "jed106.h"
 #include "policy_package.h"
 #include "target_temperature.h"
 #include "temperature_chart.h"
@@ -39,7 +40,7 @@ constexpr int maxCalibrationUs = 2500;
 constexpr int calibrationStepUs = 20;
 
 enum class Page {
-    Home, Rules, About, Settings, ControlMode, Target, Schedule, LowGear, SampleInterval, Password, Calibration, ServoTest, Message
+    Home, Rules, H2s, About, Settings, ControlMode, Target, Schedule, LowGear, SampleInterval, Password, Calibration, ServoTest, Message
 };
 enum class GearSource { Panel, Web, Test, Automatic };
 
@@ -113,6 +114,11 @@ uint32_t lastTemperatureJump = 0;
 int lowGearTenths = 10;
 Page page = Page::Home;
 unsigned rulesPageIndex = 0;
+constexpr int h2sHistoryCapacity = 60;
+jed106::Readings h2sHistory[h2sHistoryCapacity];
+int h2sHistoryCount = 0;
+int h2sHistoryNext = 0;
+uint32_t h2sSampleAt = 0;
 Page messageReturn = Page::Settings;
 const char* messageText = "";
 uint32_t pageActivity = 0;
@@ -181,7 +187,7 @@ void drawHeader() {
     display.setFont(&fonts::efontCN_16);
     display.fillRect(0, 0, 320, 31, TFT_BLACK);
     const char* title = page == Page::Home ? "暖时" : page == Page::Rules ? "控制规则" :
-                        page == Page::About ? "关于" : "设置";
+                        page == Page::H2s ? "H2S 读取" : page == Page::About ? "关于" : "设置";
     printAt(title, page == Page::Home ? 20 : 10, 8);
     char date[20] = "--/--  --:--";
     if (displayedSecond > 0) {
@@ -415,11 +421,95 @@ void drawDraftSchedule() {
     }
 }
 
+void drawH2sChannel(int top, const char* label, uint16_t color, int32_t jed106::Readings::*channel) {
+    auto& display = M5.Display;
+    constexpr int left = 43;
+    constexpr int right = 207;
+    constexpr int height = 61;
+    constexpr int valueCenter = 266;
+    constexpr uint16_t gridColor = 0x21A9;
+    const int bottom = top + height - 1;
+    const int first = (h2sHistoryNext + h2sHistoryCapacity - h2sHistoryCount) % h2sHistoryCapacity;
+
+    display.drawRect(left, top, right - left + 1, height, gridColor);
+    display.drawFastHLine(left, top + height / 2, right - left + 1, gridColor);
+    for (int i = 1; i < 4; ++i) {
+        display.drawFastVLine(left + (right - left) * i / 4, top, height, gridColor);
+    }
+
+    int32_t low = INT32_MAX;
+    int32_t high = -1;
+    for (int i = 0; i < h2sHistoryCount; ++i) {
+        const auto raw = h2sHistory[(first + i) % h2sHistoryCapacity].*channel;
+        if (raw < 0) continue;
+        if (raw < low) low = raw;
+        if (raw > high) high = raw;
+    }
+
+    char value[16];
+    if (high >= 0) {
+        display.setFont(&fonts::efontCN_12);
+        snprintf(value, sizeof(value), "%ld", static_cast<long>(high));
+        printAt(value, 7, high == low ? top + height / 2 - 6 : top, TFT_LIGHTGREY);
+        if (high != low) {
+            snprintf(value, sizeof(value), "%ld", static_cast<long>(low));
+            printAt(value, 7, bottom - 11, TFT_LIGHTGREY);
+        }
+        int previousX = 0;
+        int previousY = -1;
+        for (int i = 0; i < h2sHistoryCount; ++i) {
+            const auto raw = h2sHistory[(first + i) % h2sHistoryCapacity].*channel;
+            if (raw < 0) {
+                previousY = -1;
+                continue;
+            }
+            const int slot = h2sHistoryCapacity - h2sHistoryCount + i;
+            const int x = left + 1 + (right - left - 2) * slot / (h2sHistoryCapacity - 1);
+            const int y = high == low ? top + height / 2 : bottom - 2 - (height - 5) * (raw - low) / (high - low);
+            if (previousY >= 0) display.drawLine(previousX, previousY, x, y, color);
+            else display.drawPixel(x, y, color);
+            previousX = x;
+            previousY = y;
+        }
+    }
+
+    display.setFont(&fonts::efontCN_16);
+    printCentered(label, valueCenter, top + 3, color);
+    const auto raw = h2sHistoryCount ? h2sHistory[(h2sHistoryNext + h2sHistoryCapacity - 1) % h2sHistoryCapacity].*channel : -1;
+    if (raw < 0) {
+        printCentered(h2sHistoryCount ? "读取失败" : "等待读取", valueCenter, top + 30,
+                      h2sHistoryCount ? TFT_ORANGE : TFT_LIGHTGREY);
+    } else {
+        display.setFont(&fonts::Font4);
+        snprintf(value, sizeof(value), "%ld", static_cast<long>(raw));
+        printCentered(value, valueCenter, top + 26, color);
+    }
+}
+
+void drawH2s() {
+    auto& display = M5.Display;
+    display.startWrite();
+    display.fillRect(0, 33, 320, 181, TFT_BLACK);
+    display.setFont(&fonts::efontCN_12);
+    printCentered("0x2A   50 kHz   1 Hz", 125, 37, TFT_LIGHTGREY);
+    printCentered("原始值", 266, 37, TFT_LIGHTGREY);
+    drawH2sChannel(57, "0xA1", TFT_CYAN, &jed106::Readings::a1);
+    drawH2sChannel(132, "0xE1", TFT_YELLOW, &jed106::Readings::e1);
+    display.setFont(&fonts::efontCN_12);
+    printAt("-59 s", 43, 198, TFT_LIGHTGREY);
+    printAt("现在", 183, 198, TFT_LIGHTGREY);
+    display.endWrite();
+    drawButtonLabels("返回", "", "");
+}
+
 void drawMenu() {
     auto& display = M5.Display;
     display.fillRect(0, 31, 320, 209, TFT_BLACK);
     display.setFont(&fonts::efontCN_16);
     switch (page) {
+        case Page::H2s:
+            drawH2s();
+            break;
         case Page::About:
             printCentered("暖时", 160, 56, TFT_CYAN);
             printCentered("本设备会根据室内外温度，", 160, 96);
@@ -987,11 +1077,28 @@ void openPage(Page next) {
     if ((page == Page::Calibration || page == Page::ServoTest) && next != page && servoActive && servoPreview) {
         stopServoPulse();
     }
+    if (next == Page::H2s && page != next) {
+        h2sHistoryCount = 0;
+        h2sHistoryNext = 0;
+    }
     page = next;
     if (page == Page::Rules) rulesPageIndex = 0;
     if (page == Page::Home) invalidateTemperatureChart();
     pageActivity = millis();
     refreshClock(true);
+}
+
+void pollH2s() {
+    const uint32_t now = millis();
+    if (h2sHistoryCount && now - h2sSampleAt < 1000) return;
+    h2sSampleAt = now;
+    const auto readings = jed106::read();
+    h2sHistory[h2sHistoryNext] = readings;
+    h2sHistoryNext = (h2sHistoryNext + 1) % h2sHistoryCapacity;
+    if (h2sHistoryCount < h2sHistoryCapacity) ++h2sHistoryCount;
+    Serial.printf("[H2S] %lu ms 50 kHz A1=%ld E1=%ld\n", static_cast<unsigned long>(now),
+                  static_cast<long>(readings.a1), static_cast<long>(readings.e1));
+    drawH2s();
 }
 
 void showMessage(const char* message, Page returnPage) {
@@ -1088,6 +1195,9 @@ void handleMenuKey(char key) {
             } else if (key == 'A') {
                 openPage(Page::Rules);
             }
+            return;
+        case Page::H2s:
+            if (key == 'A') openPage(Page::Home);
             return;
         case Page::Rules:
             if (key == 'A') {
@@ -1256,7 +1366,7 @@ void updateMenu() {
         if (idle >= messageTimeoutMs) openPage(messageReturn);
         return;
     }
-    if (!primaryPage && idle >= menuTimeoutMs) {
+    if (!primaryPage && page != Page::H2s && idle >= menuTimeoutMs) {
         openPage(Page::Home);
         return;
     }
@@ -1384,6 +1494,7 @@ void loop() {
         stopServoPulse();
     }
     updateMenu();
+    if (page == Page::H2s) pollH2s();
     const int command = servoActive ? -1 : Serial.read();
     if (command == 'n') {
         // Frame: 'n', SSID length, password length, then both byte strings.
@@ -1422,6 +1533,8 @@ void loop() {
         scanBle();
     } else if (command == 'p' && page == Page::Home) {
         startServoPulse();
+    } else if (command == 'c' && page == Page::Home) {
+        openPage(Page::H2s);
     } else if (command == '?') {
         reportBoard();
     } else if (!manualControl && (command == '-' || command == '+')) {
