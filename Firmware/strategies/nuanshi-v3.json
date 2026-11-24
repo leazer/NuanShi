@@ -1,0 +1,15 @@
+{
+  "schema": 1,
+  "revision": 3,
+  "hold_minutes": 90,
+  "forecast_minutes": 60,
+  "rules": [
+    {"all":[{"metric":"indoor_deficit","op":">=","tenths":10}],"gear":40},
+    {"all":[{"metric":"forecast_deficit","op":"<=","tenths":-2}],"gear":"low"},
+    {"all":[{"metric":"forecast_deficit","op":"<=","tenths":0},{"metric":"trend","op":">=","tenths":1}],"gear":"low"},
+    {"all":[{"metric":"forecast_deficit","op":">=","tenths":6}],"gear":30},
+    {"all":[{"metric":"forecast_deficit","op":">=","tenths":2},{"metric":"indoor_deficit","op":"<=","tenths":2}],"gear":20},
+    {"all":[{"metric":"gear","op":">=","tenths":30},{"metric":"gear","op":"<=","tenths":30},{"metric":"forecast_deficit","op":">=","tenths":2}],"gear":"hold"},
+    {"all":[{"metric":"forecast_deficit","op":">=","tenths":2}],"gear":20}
+  ]
+}
