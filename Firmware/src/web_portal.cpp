@@ -8,6 +8,7 @@
 #include <mbedtls/sha256.h>
 
 #include "bench_storage.h"
+#include "firmware_version.h"
 #include "policy_package.h"
 #include "target_temperature.h"
 #include "temperature_chart.h"
@@ -227,7 +228,9 @@ void showFirmwareUpdater() {
     const auto* current = esp_ota_get_running_partition();
     const auto* next = esp_ota_get_next_update_partition(nullptr);
     String html(pageStart);
-    html += F("<section><h2>固件更新</h2><p>运行分区 ");
+    html += F("<section><h2>固件更新</h2><p>软件版本 ");
+    html += firmwareVersion;
+    html += F(" · 运行分区 ");
     html += current ? current->label : "未知";
     html += F("</p>");
     if (next) {
@@ -236,18 +239,63 @@ void showFirmwareUpdater() {
         html += F("\" data-limit=");
         html += String(next->size);
         html += F("><label>固件文件 <input id=firmware-file type=file accept=.bin required></label>"
-                  "<button>上传并重启</button><p id=firmware-state role=status></p></form><script>"
-                  "const form=document.querySelector('#firmware-form'), state=document.querySelector('#firmware-state');"
-                  "form.addEventListener('submit',async e=>{e.preventDefault();"
-                  "const file=document.querySelector('#firmware-file').files[0];"
-                  "if(!file||!file.size||file.size>Number(form.dataset.limit)){state.textContent='文件为空或超出分区容量。';return;}"
-                  "if(!confirm('安装该固件并重启设备？'))return;"
-                  "const button=form.querySelector('button');button.disabled=true;state.textContent='正在上传，请保持设备供电。';"
-                  "const data=new FormData();data.append('firmware',file);"
-                  "try{const r=await fetch('/firmware',{method:'POST',headers:{'X-Firmware-Token':form.dataset.token,"
-                  "'X-Firmware-Size':String(file.size)},body:data});state.textContent=await r.text();"
-                  "if(!r.ok)button.disabled=false;}catch{state.textContent='连接中断。请稍后打开首页确认设备状态。';"
-                  "button.disabled=false;}});</script>");
+                  "<button>上传并重启</button>"
+                  "<p id=firmware-progress hidden><progress max=100 value=0 aria-label=\"固件上传进度\"></progress> "
+                  "<span>0%</span></p><p id=firmware-state role=status></p></form>");
+        html += F(R"HTML(<script>
+const form = document.querySelector('#firmware-form');
+const picker = document.querySelector('#firmware-file');
+const state = document.querySelector('#firmware-state');
+const progress = document.querySelector('#firmware-progress');
+const bar = progress.querySelector('progress');
+const percent = progress.querySelector('span');
+const button = form.querySelector('button');
+function setProgress(value) {
+    bar.value = value;
+    percent.textContent = value + '%';
+}
+function unlock() {
+    button.disabled = false;
+    picker.disabled = false;
+}
+form.addEventListener('submit', event => {
+    event.preventDefault();
+    if (button.disabled) return;
+    const file = picker.files[0];
+    if (!file || !file.size || file.size > Number(form.dataset.limit)) {
+        state.textContent = '文件为空或超出分区容量。';
+        return;
+    }
+    if (!confirm('安装该固件并重启设备？')) return;
+    button.disabled = true;
+    picker.disabled = true;
+    progress.hidden = false;
+    setProgress(0);
+    state.textContent = '正在上传，请保持设备供电。';
+    const request = new XMLHttpRequest();
+    request.upload.onprogress = event => {
+        if (event.lengthComputable) setProgress(Math.min(99, Math.floor(100 * event.loaded / event.total)));
+    };
+    request.upload.onload = () => {
+        setProgress(100);
+        state.textContent = '上传完成，设备正在校验固件。';
+    };
+    request.onload = () => {
+        state.textContent = request.responseText || '设备未返回升级结果。';
+        if (request.status !== 200) unlock();
+    };
+    request.onerror = request.onabort = () => {
+        state.textContent = '连接中断。请稍后打开首页确认设备状态。';
+        unlock();
+    };
+    request.open('POST', '/firmware');
+    request.setRequestHeader('X-Firmware-Token', form.dataset.token);
+    request.setRequestHeader('X-Firmware-Size', String(file.size));
+    const data = new FormData();
+    data.append('firmware', file);
+    request.send(data);
+});
+</script>)HTML");
     } else {
         html += F("<p>未配置备用应用分区。</p>");
     }

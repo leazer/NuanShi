@@ -11,6 +11,7 @@
 
 #include "bench_storage.h"
 #include "changping_weather.h"
+#include "firmware_version.h"
 #include "heating_rules_page.h"
 #include "jed106.h"
 #include "policy_package.h"
@@ -513,14 +514,18 @@ void drawMenu() {
         case Page::H2s:
             drawH2s();
             break;
-        case Page::About:
-            printCentered("暖时", 160, 56, TFT_CYAN);
-            printCentered("本设备会根据室内外温度，", 160, 96);
-            printCentered("自动调节燃气地暖的加热控制。", 160, 122);
-            printCentered("WiFi IP", 160, 156, TFT_LIGHTGREY);
-            printCentered(localIpLabel().c_str(), 160, 178, TFT_CYAN);
+        case Page::About: {
+            printCentered("暖时", 160, 48, TFT_CYAN);
+            char version[40];
+            snprintf(version, sizeof(version), "软件版本 %s", firmwareVersion);
+            printCentered(version, 160, 76, TFT_LIGHTGREY);
+            printCentered("本设备会根据室内外温度，", 160, 105);
+            printCentered("自动调节燃气地暖的加热控制。", 160, 128);
+            printCentered("WiFi IP", 160, 159, TFT_LIGHTGREY);
+            printCentered(localIpLabel().c_str(), 160, 181, TFT_CYAN);
             drawButtonLabels("", "返回", "");
             break;
+        }
         case Page::Settings: {
             char start[6], end[6], hours[20], target[16], gear[12], interval[20];
             formatTime(start, sizeof(start), schedule.start);
