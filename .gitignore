@@ -2,6 +2,11 @@
 .tools/
 .codex-attachments/
 /Firmware/src/local_config.h
+nuanshi-device.json
+nuanshi-wifi.bin
+nuanshi-wifi.bak
+nuanshi-wifi.tmp
+nuanshi-mijia.bin
 *.log
 /M5-*.png
 /温度曲线-*.png

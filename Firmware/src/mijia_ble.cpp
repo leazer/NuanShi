@@ -1,5 +1,4 @@
 #include "mijia_ble.h"
-#include "device_config.h"
 
 #include <Arduino.h>
 #include <NimBLEDevice.h>
@@ -10,10 +9,9 @@ namespace {
 constexpr char serviceId[] = "ebe0ccb0-7a0a-4b0c-8a1a-6ff2997da3a6";
 constexpr char measurementId[] = "ebe0ccc1-7a0a-4b0c-8a1a-6ff2997da3a6";
 constexpr unsigned retryDelayMs = 10000;
-constexpr const char* backupAddresses[] = {NUANSHI_MIJIA_BACKUP_NEAR, NUANSHI_MIJIA_BACKUP_FAR};
 std::atomic<int> sampleIntervalMinutes{mijiaDefaultIntervalMinutes};
 
-uint8_t sensorAddress[mijiaAddressSize] = {};
+MijiaSensors sensorsToRead;
 QueueHandle_t readings = nullptr;
 QueueHandle_t outcomes = nullptr;
 TaskHandle_t readerTask = nullptr;
@@ -95,18 +93,15 @@ void readSensor(void*) {
         return;
     }
     client->setConnectTimeout(10000);
-    char mac[18];
-    snprintf(mac, sizeof(mac), "%02x:%02x:%02x:%02x:%02x:%02x", sensorAddress[0], sensorAddress[1],
-             sensorAddress[2], sensorAddress[3], sensorAddress[4], sensorAddress[5]);
-    const NimBLEAddress targets[] = {
-        NimBLEAddress(mac, BLE_ADDR_PUBLIC),
-        NimBLEAddress(backupAddresses[0], BLE_ADDR_PUBLIC),
-        NimBLEAddress(backupAddresses[1], BLE_ADDR_PUBLIC)
-    };
-    uint8_t order[mijiaMaxAttempts + 2] = {};
+    NimBLEAddress targets[mijiaSensorCount];
+    for (size_t i = 0; i < mijiaSensorCount; ++i) {
+        targets[i] = NimBLEAddress(sensorsToRead.addresses[i], BLE_ADDR_PUBLIC);
+    }
+    uint8_t order[mijiaMaxAttempts + mijiaSensorCount - 1] = {};
     unsigned attempts = mijiaMaxAttempts;
-    for (uint8_t i = 1; i < sizeof(targets) / sizeof(targets[0]); ++i) {
-        if (backupAddresses[i - 1][0] && targets[i] != targets[0] && (i == 1 || targets[i] != targets[1])) {
+    for (uint8_t i = 1; i < mijiaSensorCount; ++i) {
+        if (hasMijiaAddress(sensorsToRead.addresses[i]) && targets[i] != targets[0] &&
+            (i == 1 || targets[i] != targets[1])) {
             order[attempts++] = i;
         }
     }
@@ -124,11 +119,11 @@ void setMijiaIntervalMinutes(int minutes) {
     if (validMijiaInterval(minutes)) sampleIntervalMinutes.store(minutes);
 }
 
-bool startMijiaReader(const uint8_t (&address)[mijiaAddressSize]) {
-    if (readerTask) {
+bool startMijiaReader(const MijiaSensors& sensors) {
+    if (readerTask || !hasMijiaAddress(sensors.addresses[0])) {
         return false;
     }
-    memcpy(sensorAddress, address, sizeof(sensorAddress));
+    sensorsToRead = sensors;
     readings = xQueueCreate(1, sizeof(MijiaReading));
     if (!readings) {
         return false;

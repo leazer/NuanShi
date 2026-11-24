@@ -15,7 +15,7 @@
 | --- | --- |
 | 主控 | M5Stack Basic，经典 ESP32，4 MiB 闪存，320 × 240 屏幕 |
 | 室温传感器 | 小米米家 `LYWSD03MMC`，M5Stack 按已配置的 BLE 地址读取 |
-| 存储 | FAT32 microSD 卡，保存 Wi‑Fi 和主温度计配置、日志及温度历史 |
+| 存储 | FAT32 microSD 卡，保存 Wi‑Fi 和米家温度计配置、日志及温度历史 |
 | 舵机信号 | GPIO17（M-Bus 第 16 脚），PWM 50 Hz |
 
 ## 编译与配置
@@ -25,21 +25,23 @@
 3. 在仓库根目录执行 `pio run -d Firmware`，产物为 `Firmware/.pio/build/m5stack-basic-bench/firmware.bin`。首次部署或迁移双分区时，通过 USB 执行 `pio run -d Firmware -t upload`。
 4. 设备连网后在「关于」查看 Wi‑Fi IP，用同一局域网的浏览器访问该地址并登录。
 
-`local_config.h` 的格式如下。备用地址可留空。未配置密码摘要时，设备关闭网页服务，屏幕和采样功能仍可使用。
+`local_config.h` 的格式如下。未配置网页登录密码摘要时，设备关闭网页服务，屏幕和采样功能仍可使用。
 
 ```cpp
 #pragma once
 #define NUANSHI_WEB_PASSWORD_SHA256 "" // 填入自己生成的摘要
-#define NUANSHI_MIJIA_BACKUP_NEAR ""
-#define NUANSHI_MIJIA_BACKUP_FAR  ""
 ```
 
-新设备可在 SD 卡根目录准备两个二进制配置文件。已有配置的设备可以继续使用原卡。
+### Wi‑Fi 和米家温度计
 
-| 文件 | 内容 |
-| --- | --- |
-| `nuanshi-wifi.bin` | 2 字节长度头（SSID 长度、密码长度，各 1 字节），随后直接拼接 UTF-8 编码的 SSID 和密码，无换行和结尾空字节 |
-| `nuanshi-mijia.bin` | 主温度计的 6 字节 MAC 地址，按正常书写顺序存原始字节 |
+复制 [配置模板](Firmware/nuanshi-device.example.json)，改名为 `nuanshi-device.json` 并放到 microSD 卡根目录。用 UTF-8（无 BOM）保存，修改后重启设备。
+
+- `wifi.ssid` 和 `wifi.password` 填 Wi‑Fi 名称和密码。名称最多 32 字节，密码最多 64 字节，开放网络将密码留空。
+- `mijia.primary` 填主温度计的蓝牙 MAC，格式为 `XX:XX:XX:XX:XX:XX`。`backup_near` 和 `backup_far` 可留空。每轮先尝试主温度计最多三次，仍失败时依次尝试近、远备用温度计各一次。空白、格式错误和重复的备用地址会被跳过。
+- 固件按 MAC 直连 `LYWSD03MMC`，尝试读取 BLE GATT 测量特征，必要时等该特征的通知。配置只需要蓝牙 MAC。
+- 有效的 JSON Wi‑Fi 配置和主温度计地址优先。对应字段缺失或格式无效时，设备分别读取旧的 `nuanshi-wifi.bin` 和 `nuanshi-mijia.bin`。沿用原卡时，可以省略整个 `wifi` 段和 `mijia.primary`，只填备用地址。
+
+Wi‑Fi 密码以明文保存在 SD 卡上。实际配置文件已加入 Git 忽略规则，仓库中只提供示例。Wi‑Fi 信息和温度计地址由固件在启动时读取，更换配置无需重编译。
 
 ## 按键与更新
 

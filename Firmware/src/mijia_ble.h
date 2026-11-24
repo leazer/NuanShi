@@ -4,6 +4,7 @@
 #include <stdint.h>
 
 constexpr size_t mijiaAddressSize = 6;
+constexpr size_t mijiaSensorCount = 3;
 constexpr int mijiaMinIntervalMinutes = 1;
 constexpr int mijiaMaxIntervalMinutes = 20;
 constexpr int mijiaDefaultIntervalMinutes = 2;
@@ -38,5 +39,16 @@ struct MijiaSample {
     bool exhausted;
 };
 
-bool startMijiaReader(const uint8_t (&address)[mijiaAddressSize]);
+struct MijiaSensors {
+    uint8_t addresses[mijiaSensorCount][mijiaAddressSize] = {};
+};
+
+inline bool hasMijiaAddress(const uint8_t (&address)[mijiaAddressSize]) {
+    for (uint8_t octet : address) {
+        if (octet) return true;
+    }
+    return false;
+}
+
+bool startMijiaReader(const MijiaSensors& sensors);
 bool nextMijiaSample(MijiaSample& sample);

@@ -2,12 +2,7 @@
 
 #include <Arduino.h>
 #include <FS.h>
-#include "mijia_ble.h"
-
-struct WifiCredentials {
-    char ssid[33] = {};
-    char password[65] = {};
-};
+#include "device_settings.h"
 
 struct TemperatureRecord {
     static constexpr int16_t outdoor = INT16_MIN;
@@ -21,6 +16,7 @@ struct TemperatureRecord {
 static_assert(sizeof(TemperatureRecord) == 8, "Keep the SD record format fixed");
 
 bool mountStorage();
+void loadDeviceSettings(DeviceSettings& settings);
 bool readCredentials(Stream& source, WifiCredentials& credentials);
 bool loadCredentials(WifiCredentials& credentials);
 bool saveCredentials(const WifiCredentials& credentials);

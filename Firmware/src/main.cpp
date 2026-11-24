@@ -86,7 +86,7 @@ std::atomic<bool> clockSynced{false};
 time_t displayedSecond = 0;
 bool sdMounted = false;
 
-uint8_t mijiaAddress[mijiaAddressSize] = {};
+MijiaSensors mijiaSensors;
 bool mijiaEnabled = false;
 bool mijiaAddressPending = false;
 float indoorTemperature = NAN;
@@ -860,7 +860,7 @@ bool enableMijia() {
     if (mijiaEnabled || !initializeBle()) {
         return false;
     }
-    mijiaEnabled = startMijiaReader(mijiaAddress);
+    mijiaEnabled = startMijiaReader(mijiaSensors);
     return mijiaEnabled;
 }
 
@@ -884,7 +884,7 @@ void pollMijia() {
     }
     if (mijiaAddressPending && sample.source == 0) {
         mijiaAddressPending = false;
-        Serial.println(saveMijiaAddress(mijiaAddress) ? "[MIJIA] address saved to SD" : "[MIJIA] address active in RAM only");
+        Serial.println(saveMijiaAddress(mijiaSensors.addresses[0]) ? "[MIJIA] address saved to SD" : "[MIJIA] address active in RAM only");
     }
     if (sensorFailures) {
         logEvent("Mijia recovered");
@@ -1511,12 +1511,15 @@ void setup() {
     drawScreen("Ready");
     reportBoard();
     Serial.println("[HELP] ? board, +/- target, w WiFi, b BLE, p PWM bench, n WiFi/SNTP, d SD, t clock, m Mijia");
-    WifiCredentials credentials;
-    if (loadCredentials(credentials)) {
+    DeviceSettings settings;
+    loadDeviceSettings(settings);
+    if (settings.wifi.ssid[0] || loadCredentials(settings.wifi)) {
         Serial.println("[SD] WiFi credentials loaded");
-        connectAndSync(credentials, false);
+        connectAndSync(settings.wifi, false);
     }
-    if (loadMijiaAddress(mijiaAddress) && enableMijia()) {
+    mijiaSensors = settings.mijia;
+    auto& primaryAddress = mijiaSensors.addresses[0];
+    if ((hasMijiaAddress(primaryAddress) || loadMijiaAddress(primaryAddress)) && enableMijia()) {
         Serial.println("[MIJIA] address loaded from SD");
     }
     startWebPortal(readPortalStatus, saveTarget, saveSchedule, saveLowGear, saveControlMode, applyWebGear,
@@ -1553,7 +1556,7 @@ void loop() {
         if (Serial.readBytes(address, sizeof(address)) != sizeof(address) || mijiaEnabled) {
             Serial.println("[MIJIA] address rejected");
         } else {
-            memcpy(mijiaAddress, address, sizeof(address));
+            memcpy(mijiaSensors.addresses[0], address, sizeof(address));
             if (enableMijia()) {
                 mijiaAddressPending = true;
                 Serial.println("[MIJIA] reading LYWSD03MMC");

@@ -15,6 +15,8 @@ constexpr char temperaturePath[] = "/nuanshi-temperature.bin";
 constexpr char temperatureArchivePath[] = "/nuanshi-temperature-archive.bin";
 constexpr char temperatureImportPath[] = "/nuanshi-temperature-import.tmp";
 constexpr char mijiaPath[] = "/nuanshi-mijia.bin";
+constexpr char deviceSettingsPath[] = "/nuanshi-device.json";
+constexpr size_t maxDeviceSettingsBytes = 1024;
 bool storageMounted = false;
 
 bool readCredentialFile(const char* path, WifiCredentials& credentials) {
@@ -69,6 +71,19 @@ bool mountStorage() {
     SPI.begin(18, 19, 23, sdChipSelect);
     storageMounted = SD.begin(sdChipSelect, SPI, 10000000);
     return storageMounted;
+}
+
+void loadDeviceSettings(DeviceSettings& settings) {
+    settings = {};
+    if (!storageMounted || !SD.exists(deviceSettingsPath)) return;
+
+    File file = SD.open(deviceSettingsPath, FILE_READ);
+    const size_t size = file ? file.size() : 0;
+    char data[maxDeviceSettingsBytes];
+    if (size == 0 || size > sizeof(data) || file.readBytes(data, size) != size ||
+        !parseDeviceSettings(data, size, settings)) {
+        Serial.println("[SD] nuanshi-device.json invalid or unreadable; using legacy SD settings");
+    }
 }
 
 bool readCredentials(Stream& source, WifiCredentials& credentials) {
