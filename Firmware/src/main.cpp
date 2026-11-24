@@ -149,12 +149,12 @@ const char* controlModeName(ControlMode mode) {
     }
 }
 bool weatherStarted = false;
+bool weatherCacheChecked = false;
 bool wifiWasConnected = false;
 OutdoorSample outdoor{NAN, 0, -1};
 
 bool hasOutdoorTemperature() {
-    const double age = difftime(time(nullptr), outdoor.observedAt);
-    return clockSynced.load() && isfinite(outdoor.temperature) && age >= -900 && age <= 5400;
+    return clockSynced.load() && isFreshOutdoorSample(outdoor, time(nullptr));
 }
 
 void printAt(const char* text, int x, int y, uint16_t color = TFT_WHITE) {
@@ -566,6 +566,14 @@ void updateConnectivity() {
         wifiWasConnected = connected;
         logEvent(connected ? "WiFi link up" : "WiFi link down");
         drawHeader();
+    }
+    if (clockSynced.load() && !weatherCacheChecked) {
+        weatherCacheChecked = true;
+        if (sdMounted && loadRecentOutdoorSample(outdoor)) {
+            Serial.printf("[WEATHER] Restored Changping temperature=%.1f C source_epoch=%lld\n",
+                          outdoor.temperature, static_cast<long long>(outdoor.observedAt));
+            drawDashboard();
+        }
     }
     if (connected && clockSynced.load() && !weatherStarted) {
         weatherStarted = startOutdoorReader();
