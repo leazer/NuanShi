@@ -1,4 +1,5 @@
 #include "mijia_ble.h"
+#include "device_config.h"
 
 #include <Arduino.h>
 #include <NimBLEDevice.h>
@@ -9,7 +10,7 @@ namespace {
 constexpr char serviceId[] = "ebe0ccb0-7a0a-4b0c-8a1a-6ff2997da3a6";
 constexpr char measurementId[] = "ebe0ccc1-7a0a-4b0c-8a1a-6ff2997da3a6";
 constexpr unsigned retryDelayMs = 10000;
-constexpr const char* backupAddresses[] = {"", ""};
+constexpr const char* backupAddresses[] = {NUANSHI_MIJIA_BACKUP_NEAR, NUANSHI_MIJIA_BACKUP_FAR};
 std::atomic<int> sampleIntervalMinutes{mijiaDefaultIntervalMinutes};
 
 uint8_t sensorAddress[mijiaAddressSize] = {};
@@ -105,7 +106,9 @@ void readSensor(void*) {
     uint8_t order[mijiaMaxAttempts + 2] = {};
     unsigned attempts = mijiaMaxAttempts;
     for (uint8_t i = 1; i < sizeof(targets) / sizeof(targets[0]); ++i) {
-        if (targets[i] != targets[0]) order[attempts++] = i;
+        if (backupAddresses[i - 1][0] && targets[i] != targets[0] && (i == 1 || targets[i] != targets[1])) {
+            order[attempts++] = i;
+        }
     }
     for (;;) {
         waitForNextSample(readRound(client, targets, order, attempts));

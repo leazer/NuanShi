@@ -9,6 +9,7 @@
 
 #include "bench_storage.h"
 #include "firmware_version.h"
+#include "device_config.h"
 #include "policy_package.h"
 #include "target_temperature.h"
 #include "temperature_chart.h"
@@ -18,7 +19,8 @@ namespace {
 constexpr uint32_t sessionLifetimeMs = 3600000;
 constexpr uint32_t loginRetryMs = 1000;
 constexpr size_t logPreviewBytes = 8 * 1024;
-constexpr char passwordHash[] = "0000000000000000000000000000000000000000000000000000000000000000";
+constexpr char passwordHash[] = NUANSHI_WEB_PASSWORD_SHA256;
+static_assert(sizeof(passwordHash) == 1 || sizeof(passwordHash) == 65, "Use a 64-digit SHA-256 hash");
 WebServer server(80);
 String session;
 String formToken;
@@ -305,7 +307,7 @@ form.addEventListener('submit', event => {
 }
 
 bool passwordCorrect(const String& password) {
-    if (password.length() == 0 || password.length() > 64) return false;
+    if (sizeof(passwordHash) != 65 || password.length() == 0 || password.length() > 64) return false;
     uint8_t hash[32];
     if (mbedtls_sha256_ret(reinterpret_cast<const uint8_t*>(password.c_str()), password.length(), hash, 0) != 0) {
         return false;
@@ -771,7 +773,8 @@ void startWebPortal(PortalStatus (*status)(), bool (*target)(int),
         redirectHome();
     });
     server.onNotFound([]() { sendText(404, "页面不存在。"); });
-    server.begin();
+    if (sizeof(passwordHash) == 65) server.begin();
+    else Serial.println("[WEB] Set NUANSHI_WEB_PASSWORD_SHA256 in local_config.h to enable LAN access");
 }
 
 void pollWebPortal() {

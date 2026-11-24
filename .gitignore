@@ -1,2 +1,8 @@
 .pio/
 .tools/
+.codex-attachments/
+/Firmware/src/local_config.h
+*.log
+/M5-*.png
+/温度曲线-*.png
+/温度趋势-*.png
